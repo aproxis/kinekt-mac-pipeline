@@ -34,8 +34,9 @@ except ImportError:
     SYPHON_AVAILABLE = False
 
 # ==== НАСТРОЙКИ ====
-OSC_IP = "127.0.0.1"
+OSC_IP = "192.168.1.5"
 OSC_PORT = 7000              # Resolume OSC In
+MONITOR_OSC_IP = "127.0.0.1"
 MONITOR_OSC_PORT = 9001      # сюда параллельно шлём дубль для Protokol/мониторинга
 SEND_TO_MONITOR = True
 SEND_SYPHON = True
@@ -141,7 +142,7 @@ NUM_POSES = ask_num_poses()
 current_tilt = ask_initial_tilt()
 
 client = udp_client.SimpleUDPClient(OSC_IP, OSC_PORT)
-monitor_client = udp_client.SimpleUDPClient(OSC_IP, MONITOR_OSC_PORT) if SEND_TO_MONITOR else None
+monitor_client = udp_client.SimpleUDPClient(MONITOR_OSC_IP, MONITOR_OSC_PORT) if SEND_TO_MONITOR else None
 
 
 def send_osc(address, value):
