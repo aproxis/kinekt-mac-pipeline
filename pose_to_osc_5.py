@@ -17,6 +17,7 @@ Resolume: Preferences -> OSC -> Enable OSC Input, порт 7000.
            Edit OSC Mapping на любом параметре -> ввести /pose/0/nose/y и т.д.
 """
 
+import socket
 import time
 import cv2
 import numpy as np
@@ -145,11 +146,22 @@ current_tilt = ask_initial_tilt()
 client = udp_client.SimpleUDPClient(OSC_IP, OSC_PORT)
 monitor_client = udp_client.SimpleUDPClient(MONITOR_OSC_IP, MONITOR_OSC_PORT) if SEND_TO_MONITOR else None
 
+# non-blocking сокеты — не крешиться если Resolume не слушает
+client._sock.setblocking(False)
+if monitor_client is not None:
+    monitor_client._sock.setblocking(False)
+
 
 def send_osc(address, value):
-    client.send_message(address, value)
+    try:
+        client.send_message(address, value)
+    except (BlockingIOError, OSError):
+        pass
     if monitor_client is not None:
-        monitor_client.send_message(address, value)
+        try:
+            monitor_client.send_message(address, value)
+        except (BlockingIOError, OSError):
+            pass
 
 
 base_options = mp_python.BaseOptions(model_asset_path=MODEL_PATH)
