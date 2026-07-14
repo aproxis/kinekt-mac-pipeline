@@ -368,7 +368,7 @@ function renderAbleton() {
       for (const p of d.parameters) {
         const key = `${t.index}/${d.index}/${p.index}`;
         const sel = selectedParam === key ? 'selected' : '';
-        html += `<div class="param-row ${sel}" data-key="${key}" data-track="${t.index}" data-device="${d.index}" data-param="${p.index}" data-name="${p.name.replace(/"/g, '&quot;')}">
+        html += `<div class="param-row ${sel}" data-key="${key}" data-track="${t.index}" data-device="${d.index}" data-param="${p.index}" data-name="${p.name.replace(/"/g, '&quot;')}" data-track-name="${t.name.replace(/"/g, '&quot;')}" data-device-name="${d.name.replace(/"/g, '&quot;')}">
           <span>${p.name}</span>
           <span class="param-idx">#${p.index}</span>
         </div>`;
@@ -392,7 +392,7 @@ function renderAbleton() {
   // param click
   el.querySelectorAll('.param-row').forEach(r => {
     r.addEventListener('click', () => {
-      selectParam(r.dataset.key, +r.dataset.track, +r.dataset.device, +r.dataset.param, r.dataset.name);
+      selectParam(r.dataset.key, +r.dataset.track, +r.dataset.device, +r.dataset.param, r.dataset.name, r.dataset.trackName, r.dataset.deviceName);
     });
   });
 }
@@ -408,9 +408,11 @@ function renderMappings() {
 
   let html = '';
   for (const m of mappings) {
+    const dst = m.paramName ? `${m.deviceName} → ${m.paramName}` : `Track ${m.track} · Dev ${m.device} · #${m.param}`;
     html += `<div class="map-card">
       <button class="del" onclick="removeMapping(${m.id})">✕</button>
-      <div><span class="map-src">${m.joint}/${m.axis}</span><span class="map-arrow">→</span><span class="map-dst">Track ${m.track} · Dev ${m.device} · #${m.param}</span></div>
+      <div style="margin-right:18px"><span class="map-src">${m.joint}/${m.axis}</span></div>
+      <div style="margin-right:18px"><span class="map-arrow">→</span> <span class="map-dst">${dst}</span></div>
     </div>`;
   }
   el.innerHTML = html;
@@ -422,9 +424,9 @@ function selectJoint(key) {
   updateJoints();
 }
 
-function selectParam(key, track, device, param, name) {
+function selectParam(key, track, device, param, name, trackName, deviceName) {
   selectedParam = key;
-  selectedParamData = { track, device, param, name };
+  selectedParamData = { track, device, param, name, trackName, deviceName };
   updateAddBtn();
   renderAbleton();
 }
@@ -437,7 +439,16 @@ async function addMapping() {
   if (!selectedJoint || !selectedParamData) return;
   const [joint, axis] = selectedJoint.split('/');
   const maxId = mappings.reduce((m, x) => Math.max(m, x.id || 0), 0);
-  mappings.push({ id: maxId + 1, joint, axis, track: selectedParamData.track, device: selectedParamData.device, param: selectedParamData.param });
+  mappings.push({
+    id: maxId + 1,
+    joint, axis,
+    track: selectedParamData.track,
+    device: selectedParamData.device,
+    param: selectedParamData.param,
+    trackName: selectedParamData.trackName || `Track ${selectedParamData.track}`,
+    deviceName: selectedParamData.deviceName || `Device ${selectedParamData.device}`,
+    paramName: selectedParamData.name || `#${selectedParamData.param}`,
+  });
   renderMappings();
   selectedJoint = null;
   selectedParam = null;
