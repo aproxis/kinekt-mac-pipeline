@@ -165,6 +165,15 @@ body {
       </button>
     </div>
     <div class="col-body" id="ableton-tree"><div class="no-data">Press Scan to discover devices</div></div>
+    <div class="col-actions" style="border-top:1px solid #18181b;padding:6px 8px;display:flex;flex-direction:column;gap:4px">
+      <button class="btn" onclick="const f=document.getElementById('manual-form');f.style.display=f.style.display==='none'?'flex':'none'" style="font-size:11px">⚙️ Manual param</button>
+      <div id="manual-form" style="display:none;display:flex;gap:4px;flex-wrap:wrap">
+        <input type="number" id="manual-track" placeholder="track" value="0" style="width:56px;background:#18181b;border:1px solid #27272a;color:#d4d4d8;padding:3px 6px;border-radius:4px;font-size:11px">
+        <input type="number" id="manual-device" placeholder="dev" value="0" style="width:52px;background:#18181b;border:1px solid #27272a;color:#d4d4d8;padding:3px 6px;border-radius:4px;font-size:11px">
+        <input type="number" id="manual-param" placeholder="param#" value="1" style="flex:1;min-width:40px;background:#18181b;border:1px solid #27272a;color:#d4d4d8;padding:3px 6px;border-radius:4px;font-size:11px">
+        <button class="btn" onclick="addManualMapping()" style="font-size:11px;padding:3px 8px">Add</button>
+      </div>
+    </div>
   </div>
 
   <div class="col">
@@ -464,6 +473,22 @@ async function removeMapping(id) {
   mappings = mappings.filter(m => m.id !== id);
   renderMappings();
   await doSave();
+}
+
+function addManualMapping() {
+  const track = +document.getElementById('manual-track').value;
+  const device = +document.getElementById('manual-device').value;
+  const param = +document.getElementById('manual-param').value;
+  if (!selectedJoint) { alert('Select a joint first'); return; }
+  const [joint, axis] = selectedJoint.split('/');
+  const maxId = mappings.reduce((m, x) => Math.max(m, x.id || 0), 0);
+  mappings.push({
+    id: maxId + 1, joint, axis,
+    track, device, param,
+    trackName: `Track ${track}`, deviceName: `Device ${device}`, paramName: `Param #${param}`,
+  });
+  renderMappings();
+  doSave();
 }
 
 async function doSave() {
