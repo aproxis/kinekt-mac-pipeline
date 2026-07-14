@@ -338,10 +338,16 @@ def scan_ableton():
 
                 r = ableton_query("/live/device/get/parameters/name", t, d)
                 names = list(r.params[2:]) if r and len(r.params) > 2 else []
+                r = ableton_query("/live/device/get/parameters/min", t, d)
+                mins = list(r.params[2:]) if r and len(r.params) > 2 else []
+                r = ableton_query("/live/device/get/parameters/max", t, d)
+                maxs = list(r.params[2:]) if r and len(r.params) > 2 else []
 
                 for i, pname in enumerate(names):
                     dev["parameters"].append({
                         "index": i, "name": str(pname),
+                        "min": float(mins[i]) if i < len(mins) else 0.0,
+                        "max": float(maxs[i]) if i < len(maxs) else 1.0,
                     })
 
                 tr["devices"].append(dev)
@@ -676,6 +682,13 @@ try:
                                         threshold = m.get("threshold", 0)
                                         skey = f"ableton_{m['id']}"
                                         sval = smooth_val(skey, val, smoothing)
+                                        # scale/min/max
+                                        scale = m.get("scale", 1.0)
+                                        pmin = m.get("min", 0.0)
+                                        pmax = m.get("max", 1.0)
+                                        if scale != 1.0:
+                                            sval = max(0.0, min(1.0, sval * scale))
+                                        sval = pmin + max(0.0, min(1.0, sval)) * (pmax - pmin)
                                         last = last_sent.get(skey)
                                         if threshold and last is not None and abs(sval - last) < threshold:
                                             pass

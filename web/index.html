@@ -170,7 +170,9 @@ body {
       <div id="manual-form" style="display:none;display:flex;gap:4px;flex-wrap:wrap">
         <input type="number" id="manual-track" placeholder="track" value="0" style="width:56px;background:#18181b;border:1px solid #27272a;color:#d4d4d8;padding:3px 6px;border-radius:4px;font-size:11px">
         <input type="number" id="manual-device" placeholder="dev" value="0" style="width:52px;background:#18181b;border:1px solid #27272a;color:#d4d4d8;padding:3px 6px;border-radius:4px;font-size:11px">
-        <input type="number" id="manual-param" placeholder="param#" value="1" style="flex:1;min-width:40px;background:#18181b;border:1px solid #27272a;color:#d4d4d8;padding:3px 6px;border-radius:4px;font-size:11px">
+        <input type="number" id="manual-param" placeholder="param#" value="1" style="width:56px;background:#18181b;border:1px solid #27272a;color:#d4d4d8;padding:3px 6px;border-radius:4px;font-size:11px">
+        <input type="number" id="manual-min" placeholder="min" value="0" step="0.1" style="width:52px;background:#18181b;border:1px solid #27272a;color:#d4d4d8;padding:3px 6px;border-radius:4px;font-size:11px">
+        <input type="number" id="manual-max" placeholder="max" value="1" step="0.1" style="width:52px;background:#18181b;border:1px solid #27272a;color:#d4d4d8;padding:3px 6px;border-radius:4px;font-size:11px">
         <button class="btn" onclick="addManualMapping()" style="font-size:11px;padding:3px 8px">Add</button>
       </div>
     </div>
@@ -377,9 +379,11 @@ function renderAbleton() {
       for (const p of d.parameters) {
         const key = `${t.index}/${d.index}/${p.index}`;
         const sel = selectedParam === key ? 'selected' : '';
-        html += `<div class="param-row ${sel}" data-key="${key}" data-track="${t.index}" data-device="${d.index}" data-param="${p.index}" data-name="${p.name.replace(/"/g, '&quot;')}" data-track-name="${t.name.replace(/"/g, '&quot;')}" data-device-name="${d.name.replace(/"/g, '&quot;')}">
+        const pmin = typeof p.min === 'number' ? p.min : 0;
+        const pmax = typeof p.max === 'number' ? p.max : 1;
+        html += `<div class="param-row ${sel}" data-key="${key}" data-track="${t.index}" data-device="${d.index}" data-param="${p.index}" data-name="${p.name.replace(/"/g, '&quot;')}" data-track-name="${t.name.replace(/"/g, '&quot;')}" data-device-name="${d.name.replace(/"/g, '&quot;')}" data-min="${pmin}" data-max="${pmax}">
           <span>${p.name}</span>
-          <span class="param-idx">#${p.index}</span>
+          <span class="param-idx">${pmin.toFixed(1)}–${pmax.toFixed(1)} · #${p.index}</span>
         </div>`;
       }
       html += `</div></div>`;
@@ -401,7 +405,7 @@ function renderAbleton() {
   // param click
   el.querySelectorAll('.param-row').forEach(r => {
     r.addEventListener('click', () => {
-      selectParam(r.dataset.key, +r.dataset.track, +r.dataset.device, +r.dataset.param, r.dataset.name, r.dataset.trackName, r.dataset.deviceName);
+      selectParam(r.dataset.key, +r.dataset.track, +r.dataset.device, +r.dataset.param, r.dataset.name, r.dataset.trackName, r.dataset.deviceName, +r.dataset.min, +r.dataset.max);
     });
   });
 }
@@ -417,7 +421,8 @@ function renderMappings() {
 
   let html = '';
   for (const m of mappings) {
-    const dst = m.paramName ? `${m.deviceName} → ${m.paramName}` : `Track ${m.track} · Dev ${m.device} · #${m.param}`;
+    const rangeTxt = (typeof m.min === 'number' && typeof m.max === 'number') ? ` (${m.min.toFixed(1)}–${m.max.toFixed(1)})` : '';
+    const dst = (m.paramName ? `${m.deviceName} → ${m.paramName}` : `Track ${m.track} · Dev ${m.device} · #${m.param}`) + rangeTxt;
     html += `<div class="map-card">
       <button class="del" onclick="removeMapping(${m.id})">✕</button>
       <div style="margin-right:18px"><span class="map-src">${m.joint}/${m.axis}</span></div>
@@ -433,9 +438,13 @@ function selectJoint(key) {
   updateJoints();
 }
 
-function selectParam(key, track, device, param, name, trackName, deviceName) {
+function selectParam(key, track, device, param, name, trackName, deviceName, min, max) {
   selectedParam = key;
-  selectedParamData = { track, device, param, name, trackName, deviceName };
+  selectedParamData = {
+    track, device, param, name, trackName, deviceName,
+    min: typeof min === 'number' && !isNaN(min) ? min : 0,
+    max: typeof max === 'number' && !isNaN(max) ? max : 1,
+  };
   updateAddBtn();
   renderAbleton();
 }
@@ -454,6 +463,8 @@ async function addMapping() {
     track: selectedParamData.track,
     device: selectedParamData.device,
     param: selectedParamData.param,
+    min: selectedParamData.min ?? 0,
+    max: selectedParamData.max ?? 1,
     trackName: selectedParamData.trackName || `Track ${selectedParamData.track}`,
     deviceName: selectedParamData.deviceName || `Device ${selectedParamData.device}`,
     paramName: selectedParamData.name || `#${selectedParamData.param}`,
@@ -479,12 +490,16 @@ function addManualMapping() {
   const track = +document.getElementById('manual-track').value;
   const device = +document.getElementById('manual-device').value;
   const param = +document.getElementById('manual-param').value;
+  const minEl = document.getElementById('manual-min');
+  const maxEl = document.getElementById('manual-max');
+  const min = minEl.value === '' ? 0 : +minEl.value;
+  const max = maxEl.value === '' ? 1 : +maxEl.value;
   if (!selectedJoint) { alert('Select a joint first'); return; }
   const [joint, axis] = selectedJoint.split('/');
   const maxId = mappings.reduce((m, x) => Math.max(m, x.id || 0), 0);
   mappings.push({
     id: maxId + 1, joint, axis,
-    track, device, param,
+    track, device, param, min, max,
     trackName: `Track ${track}`, deviceName: `Device ${device}`, paramName: `Param #${param}`,
   });
   renderMappings();
