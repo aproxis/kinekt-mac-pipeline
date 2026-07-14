@@ -5,7 +5,9 @@
     "axis": "y",
     "track": 4,
     "device": 0,
-    "param": 144
+    "param": 144,
+    "smoothing": 0.8,
+    "threshold": 0.005
   },
   {
     "id": 2,
@@ -13,6 +15,8 @@
     "axis": "y",
     "track": 4,
     "device": 0,
-    "param": 148
+    "param": 148,
+    "smoothing": 0.8,
+    "threshold": 0.005
   }
 ]

@@ -59,7 +59,7 @@ CONSOLE_PRINT_EVERY_N_FRAMES = 30
 OSC_SEND_FLAT = True
 
 CAMERA_SOURCE = "auto"
-SMOOTHING_ALPHA = 0.4
+SMOOTHING_ALPHA = 0.8   # глобальное сглаживание (0-1). Per-mapping в JSON переопределяет
 
 ABLETON_OSC_IP = "127.0.0.1"
 ABLETON_OSC_PORT = 11000
@@ -98,6 +98,8 @@ joint_state_lock = threading.Lock()
 live_mappings = []
 mappings_lock = threading.Lock()
 ableton_scanning = False
+
+last_sent = {}  # для threshold проверки
 
 # ==== СГЛАЖИВАНИЕ ====
 def smooth_val(key, raw, alpha):
@@ -555,10 +557,21 @@ try:
                                 if m["joint"] == name:
                                     val = {"x": x, "y": y, "z": z, "vis": visibility}.get(m["axis"])
                                     if val is not None:
-                                        ableton_client.send_message(
-                                            "/live/device/set/parameter/value",
-                                            [m["track"], m["device"], m["param"], val]
-                                        )
+                                        smoothing = m.get("smoothing", SMOOTHING_ALPHA)
+                                        threshold = m.get("threshold", 0)
+                                        # per-mapping сглаживание
+                                        skey = f"ableton_{m['id']}"
+                                        sval = smooth_val(skey, val, smoothing)
+                                        # threshold — не шлём если изменение меньше порога
+                                        last = last_sent.get(skey)
+                                        if threshold and last is not None and abs(sval - last) < threshold:
+                                            pass
+                                        else:
+                                            last_sent[skey] = sval
+                                            ableton_client.send_message(
+                                                "/live/device/set/parameter/value",
+                                                [m["track"], m["device"], m["param"], sval]
+                                            )
 
                     if OSC_SEND_FLAT:
                         base = f"/pose/{person_idx}/{name}"
