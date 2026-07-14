@@ -18,6 +18,7 @@ Web UI: http://localhost:8080
 
 import socket
 import json
+import os
 import time
 import cv2
 import numpy as np
@@ -65,7 +66,9 @@ ABLETON_OSC_IP = "127.0.0.1"
 ABLETON_OSC_PORT = 11000
 SEND_TO_ABLETON = True
 
-MAPPINGS_PATH = "mappings.json"
+MAPPINGS_PATH = "mappings.json"   # legacy fallback
+PROFILES_DIR = "profiles"
+CURRENT_PROFILE = "default"
 WEB_HOST = "0.0.0.0"
 WEB_PORT = 8080
 
@@ -175,33 +178,100 @@ def ask_initial_tilt():
         return 0
 
 
-# ==== MAPPINGS ====
+# ==== PROFILES ====
+current_profile = CURRENT_PROFILE
+
+
+def ensure_profiles_dir():
+    os.makedirs(PROFILES_DIR, exist_ok=True)
+
+
+def profile_path(name):
+    return os.path.join(PROFILES_DIR, f"{name}.json")
+
+
+def list_profiles():
+    ensure_profiles_dir()
+    names = []
+    for f in sorted(os.listdir(PROFILES_DIR)):
+        if f.endswith(".json"):
+            names.append(f[:-5])
+    return names
+
+
 def load_mappings():
-    global live_mappings
-    try:
-        with open(MAPPINGS_PATH) as f:
+    global live_mappings, current_profile
+    ensure_profiles_dir()
+    # try current profile first
+    path = profile_path(current_profile)
+    if os.path.exists(path):
+        with open(path) as f:
             data = json.load(f)
         with mappings_lock:
             live_mappings = data
-        print(f"Загружено {len(data)} маппингов из {MAPPINGS_PATH}")
+        print(f"Profile '{current_profile}': {len(data)} mappings")
         return data
-    except FileNotFoundError:
-        default = [
-            {"id": 1, "joint": "right_wrist", "axis": "y", "track": 4, "device": 0, "param": 144},
-            {"id": 2, "joint": "left_wrist", "axis": "y", "track": 4, "device": 0, "param": 148},
-        ]
-        save_mappings(default)
+    # fallback: migrate from legacy mappings.json
+    if os.path.exists(MAPPINGS_PATH):
+        with open(MAPPINGS_PATH) as f:
+            data = json.load(f)
+        with open(path, "w") as f:
+            json.dump(data, f, indent=2)
         with mappings_lock:
-            live_mappings = default
-        return default
+            live_mappings = data
+        print(f"Migrated mappings.json -> profiles/{current_profile}.json")
+        return data
+    # create default
+    default = [
+        {"id": 1, "joint": "right_wrist", "axis": "y", "track": 4, "device": 0, "param": 144, "smoothing": 0.8, "threshold": 0.005},
+        {"id": 2, "joint": "left_wrist", "axis": "y", "track": 4, "device": 0, "param": 148, "smoothing": 0.8, "threshold": 0.005},
+    ]
+    with open(path, "w") as f:
+        json.dump(default, f, indent=2)
+    with mappings_lock:
+        live_mappings = default
+    print(f"Created default profile: {len(default)} mappings")
+    return default
 
 
 def save_mappings(data):
     with mappings_lock:
         live_mappings = data
-    with open(MAPPINGS_PATH, "w") as f:
+    path = profile_path(current_profile)
+    with open(path, "w") as f:
         json.dump(data, f, indent=2)
-    print(f"Сохранено {len(data)} маппингов")
+    print(f"Saved profile '{current_profile}': {len(data)} mappings")
+
+
+def load_profile(name):
+    global live_mappings, current_profile
+    path = profile_path(name)
+    if not os.path.exists(path):
+        return None
+    with open(path) as f:
+        data = json.load(f)
+    with mappings_lock:
+        live_mappings = data
+    current_profile = name
+    print(f"Switched to profile '{name}': {len(data)} mappings")
+    return data
+
+
+def save_as_profile(name, data):
+    path = profile_path(name)
+    with open(path, "w") as f:
+        json.dump(data, f, indent=2)
+    print(f"Saved as profile '{name}': {len(data)} mappings")
+
+
+def delete_profile(name):
+    if name == CURRENT_PROFILE:
+        return False
+    path = profile_path(name)
+    if os.path.exists(path):
+        os.remove(path)
+        return True
+    return False
 
 
 # ==== ABLETON SCANNER ====
@@ -300,6 +370,13 @@ def web_server():
                 with mappings_lock:
                     self.send_json(live_mappings)
 
+            elif path == "/api/profiles":
+                self.send_json(list_profiles())
+
+            elif path == "/api/profiles/current":
+                with mappings_lock:
+                    self.send_json({"name": current_profile, "mappings": live_mappings})
+
             elif path == "/api/ableton/scan":
                 self.send_json(scan_ableton())
 
@@ -317,15 +394,50 @@ def web_server():
                 self.send_json({"error": "not found"}, 404)
 
         def do_PUT(self):
+            length = int(self.headers.get("Content-Length", 0))
+            body = self.rfile.read(length)
+            try:
+                data = json.loads(body)
+            except Exception:
+                self.send_json({"error": "bad json"}, 400)
+                return
+
             if self.path == "/api/mappings":
-                length = int(self.headers.get("Content-Length", 0))
-                body = self.rfile.read(length)
-                try:
-                    data = json.loads(body)
-                    save_mappings(data)
+                save_mappings(data)
+                self.send_json({"ok": True})
+
+            elif self.path == "/api/profiles/load":
+                name = data.get("name")
+                if not name:
+                    self.send_json({"error": "name required"}, 400)
+                elif load_profile(name) is None:
+                    self.send_json({"error": f"profile '{name}' not found"}, 404)
+                else:
+                    self.send_json({"ok": True, "name": name})
+
+            elif self.path == "/api/profiles/save":
+                name = data.get("name")
+                mappings = data.get("mappings")
+                if not name or mappings is None:
+                    self.send_json({"error": "name and mappings required"}, 400)
+                save_as_profile(name, mappings)
+                self.send_json({"ok": True, "name": name})
+
+            else:
+                self.send_json({"error": "not found"}, 404)
+
+        def do_DELETE(self):
+            import urllib.parse as up
+            parsed = up.urlparse(self.path)
+            if parsed.path == "/api/profiles":
+                query = parse_qs(parsed.query)
+                name = query.get("name", [None])[0]
+                if not name:
+                    self.send_json({"error": "name required"}, 400)
+                elif delete_profile(name):
                     self.send_json({"ok": True})
-                except Exception as e:
-                    self.send_json({"error": str(e)}, 400)
+                else:
+                    self.send_json({"error": f"cannot delete '{name}'"}, 400)
             else:
                 self.send_json({"error": "not found"}, 404)
 

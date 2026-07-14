@@ -26,6 +26,12 @@ body {
 .status .dot.gray { background: #52525b; }
 .status-item { display: flex; align-items: center; gap: 4px; }
 .status-item strong { color: #a1a1aa; font-weight: 500; }
+.profile-select {
+  background: #18181b; border: 1px solid #27272a;
+  color: #d4d4d8; padding: 2px 8px; border-radius: 4px;
+  font-size: 12px; cursor: pointer; margin-left: auto;
+}
+.profile-select:hover { border-color: #3f3f46; }
 
 /* ── columns ── */
 .columns { display: flex; flex: 1; min-height: 0; }
@@ -142,6 +148,7 @@ body {
   <span class="status-item"><span class="dot green" id="joint-dot"></span><strong>Joints</strong> <span id="joint-status">waiting</span></span>
   <span class="status-item"><span class="dot yellow" id="ableton-dot"></span><strong>Ableton</strong> <span id="ableton-status">not scanned</span></span>
   <span class="status-item"><span class="dot gray" id="map-dot"></span><strong>Mappings</strong> <span id="map-status">0</span></span>
+  <select class="profile-select" id="profile-select" onchange="switchProfile(this.value)"></select>
 </div>
 
 <div class="columns">
@@ -165,7 +172,11 @@ body {
     <div class="col-body" id="mappings-list"><div class="no-data">No mappings</div></div>
     <div class="col-actions">
       <button class="btn btn-green" id="add-btn" disabled onclick="addMapping()">+ Add Mapping</button>
-      <button class="btn btn-primary" id="save-btn" onclick="saveMappings()">Save to File</button>
+      <div style="display:flex;gap:4px">
+        <input type="text" id="profile-name" placeholder="profile name" style="flex:1;background:#18181b;border:1px solid #27272a;color:#d4d4d8;padding:4px 8px;border-radius:5px;font-size:12px">
+        <button class="btn" id="saveas-btn" onclick="saveAsProfile()">Save As</button>
+      </div>
+      <button class="btn btn-primary" id="save-btn" onclick="saveMappings()">Save</button>
     </div>
   </div>
 </div>
@@ -252,6 +263,37 @@ async function loadMappings() {
     const data = await api('/mappings');
     mappings = data;
     renderMappings();
+  } catch {}
+}
+
+async function loadProfiles() {
+  try {
+    const [names, current] = await Promise.all([
+      api('/profiles'),
+      api('/profiles/current')
+    ]);
+    const sel = document.getElementById('profile-select');
+    sel.innerHTML = names.map(n => `<option value="${n}" ${n === current.name ? 'selected' : ''}>${n}</option>`).join('');
+  } catch {}
+}
+
+async function switchProfile(name) {
+  await doSave(); // save current first
+  try {
+    await api('/profiles/load', { method: 'PUT', headers: {'Content-Type':'application/json'}, body: JSON.stringify({name}) });
+    await loadMappings();
+    await loadProfiles();
+  } catch {}
+}
+
+async function saveAsProfile() {
+  const name = document.getElementById('profile-name').value.trim();
+  if (!name) return;
+  try {
+    await api('/profiles/save', { method: 'PUT', headers: {'Content-Type':'application/json'}, body: JSON.stringify({name, mappings}) });
+    document.getElementById('profile-name').value = '';
+    await loadProfiles();
+    await switchProfile(name);
   } catch {}
 }
 
@@ -425,7 +467,8 @@ async function doSave() {
   }
   setTimeout(() => {
     btn.disabled = false;
-    btn.textContent = 'Save to File';
+    btn.textContent = 'Save';
+    loadProfiles();
   }, 1500);
 }
 
@@ -435,6 +478,7 @@ async function saveMappings() {
 
 setInterval(loadJoints, 200);
 loadMappings();
+loadProfiles();
 </script>
 </body>
 </html>
