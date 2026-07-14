@@ -27,6 +27,7 @@ from mediapipe.tasks import python as mp_python
 from mediapipe.tasks.python import vision
 from pythonosc import udp_client
 from pythonosc import osc_message
+from pythonosc.osc_message_builder import OscMessageBuilder
 import threading
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from urllib.parse import urlparse, parse_qs
@@ -96,6 +97,7 @@ joint_state = {}
 joint_state_lock = threading.Lock()
 live_mappings = []
 mappings_lock = threading.Lock()
+ableton_scanning = False
 
 # ==== СГЛАЖИВАНИЕ ====
 def smooth_val(key, raw, alpha):
@@ -201,58 +203,80 @@ def save_mappings(data):
 
 
 # ==== ABLETON SCANNER ====
-def ableton_query(address, *args, timeout=3):
-    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    s.settimeout(timeout)
-    s.bind(("0.0.0.0", 0))
-    send_port = s.getsockname()[1]
+def ableton_query(address, *args, timeout=4):
+    listener = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    listener.bind(("0.0.0.0", 11001))
+    listener.settimeout(0.01)
+    for _ in range(500):
+        try:
+            listener.recvfrom(65535)
+        except socket.timeout:
+            break
+
+    sender = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     try:
-        msg = osc_message.OscMessage(address)
+        builder = OscMessageBuilder(address)
         for a in args:
             if isinstance(a, int):
-                msg.append(a)
+                builder.add_arg(a, "i")
             elif isinstance(a, float):
-                msg.append(a)
+                builder.add_arg(a, "f")
             else:
-                msg.append(str(a))
-        s.sendto(msg.dgram, (ABLETON_OSC_IP, ABLETON_OSC_PORT))
-        data, _ = s.recvfrom(65535)
-        parsed = osc_message.OscMessage(data)
-        return parsed
-    except socket.timeout:
+                builder.add_arg(str(a), "s")
+        sender.sendto(builder.build().dgram, (ABLETON_OSC_IP, ABLETON_OSC_PORT))
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            listener.settimeout(max(0.01, deadline - time.time()))
+            try:
+                data, _ = listener.recvfrom(65535)
+                parsed = osc_message.OscMessage(data)
+                if parsed.address != "/live/error" and parsed.address != "/live/startup":
+                    return parsed
+            except socket.timeout:
+                return None
         return None
     finally:
-        s.close()
+        sender.close()
+        listener.close()
 
 
 def scan_ableton():
+    global ableton_scanning
+    ableton_scanning = True
+    time.sleep(0.1)
     try:
-        result = ableton_query("/live/song/get/num_tracks")
-        num_tracks = int(result.params[0]) if result else 0
+        r = ableton_query("/live/song/get/num_tracks")
+        num_tracks = int(r.params[-1]) if r else 0
+        r = ableton_query("/live/song/get/track_data", 0, num_tracks, "track.name")
+        track_names = list(r.params) if r else []
+
         tracks = []
         for t in range(num_tracks):
-            tr = {"index": t, "name": f"Track {t}", "devices": []}
-            name_resp = ableton_query("/live/song/get/track_data", t, t + 1, "track.name")
-            if name_resp and len(name_resp.params) > 0:
-                tr["name"] = str(name_resp.params[0])
-            num_dev = ableton_query("/live/track/get/num_devices", t)
-            num_devices = int(num_dev.params[0]) if num_dev else 0
+            name = str(track_names[t]) if t < len(track_names) else f"Track {t}"
+            tr = {"index": t, "name": name, "devices": []}
+
+            r = ableton_query("/live/track/get/num_devices", t)
+            num_devices = int(r.params[-1]) if r else 0
+
             for d in range(num_devices):
-                dev = {"index": d, "name": f"Device {d}", "parameters": []}
-                name_d = ableton_query("/live/track/get/devices/name", t, d)
-                if name_d and len(name_d.params) > 0:
-                    dev["name"] = str(name_d.params[2])
-                num_p = ableton_query("/live/device/get/num_parameters", t, d)
-                num_params = int(num_p.params[2]) if num_p else 0
-                for p in range(min(num_params, 80)):
-                    pn = ableton_query("/live/device/get/parameter/name", t, d, p)
-                    if pn and len(pn.params) > 3:
-                        dev["parameters"].append({"index": p, "name": str(pn.params[3])})
+                r = ableton_query("/live/track/get/devices/name", t, d)
+                dname = str(r.params[-1]) if r else f"Device {d}"
+                dev = {"index": d, "name": dname, "parameters": []}
+
+                r = ableton_query("/live/device/get/parameters/name", t, d)
+                if r and len(r.params) > 2:
+                    for i, pname in enumerate(r.params[2:]):
+                        dev["parameters"].append({"index": i, "name": str(pname)})
+
                 tr["devices"].append(dev)
             tracks.append(tr)
+
         return {"tracks": tracks, "total": num_tracks}
     except Exception as e:
         return {"error": str(e)}
+    finally:
+        ableton_scanning = False
 
 
 # ==== WEB SERVER ====
@@ -525,7 +549,7 @@ try:
                     send_osc(f"/pose/{person_idx}/{name}", [x, y, z, visibility])
 
                     # Ableton маппинг из JSON
-                    if ableton_client is not None and person_idx == 0:
+                    if ableton_client is not None and person_idx == 0 and not ableton_scanning:
                         with mappings_lock:
                             for m in live_mappings:
                                 if m["joint"] == name:
