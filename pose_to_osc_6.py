@@ -57,6 +57,16 @@ CAMERA_SOURCE = "auto"       # "kinect" — только Kinect, "webcam" — Ma
 
 SMOOTHING_ALPHA = 0.4        # 0 = без сглаживания, 0.9 = макс сглаживание
 
+ABLETON_OSC_IP = "127.0.0.1"
+ABLETON_OSC_PORT = 11000
+SEND_TO_ABLETON = True
+# source: "{joint_name}/{axis}" — ось сустава
+# target: [track, device, param] — адрес параметра в Ableton
+ABLETON_MAP = [
+    {"source": "right_wrist/y", "track": 4, "device": 0, "param": 144},   # LFO Rate
+    {"source": "left_wrist/y",  "track": 4, "device": 0, "param": 148},   # LFO Amt
+]
+
 DEPTH_MIN_MM = 500
 DEPTH_MAX_MM = 2500
 
@@ -165,10 +175,13 @@ current_tilt = ask_initial_tilt()
 
 client = udp_client.SimpleUDPClient(OSC_IP, OSC_PORT)
 monitor_client = udp_client.SimpleUDPClient(MONITOR_OSC_IP, MONITOR_OSC_PORT) if SEND_TO_MONITOR else None
+ableton_client = udp_client.SimpleUDPClient(ABLETON_OSC_IP, ABLETON_OSC_PORT) if SEND_TO_ABLETON and ABLETON_MAP else None
 
 client._sock.setblocking(False)
 if monitor_client is not None:
     monitor_client._sock.setblocking(False)
+if ableton_client is not None:
+    ableton_client._sock.setblocking(False)
 
 
 def send_osc(address, value):
@@ -272,6 +285,8 @@ if camera_mode == "webcam":
     print("(тилт доступен только с Kinect)")
 if OSC_SEND_FLAT:
     print("OSC плоские адреса: /pose/{person}/{joint}/{x|y|z|vis}")
+if ableton_client is not None:
+    print(f"AbletonOSC: маппинг {len(ABLETON_MAP)} параметров на :{ABLETON_OSC_PORT}")
 if SMOOTHING_ALPHA > 0:
     print(f"Сглаживание: alpha={SMOOTHING_ALPHA}")
 
@@ -355,6 +370,19 @@ try:
                     visibility = smooth_val(f"p{person_idx}_{name}_vis", round(getattr(lm, "visibility", 1.0), 4), a)
 
                     send_osc(f"/pose/{person_idx}/{name}", [x, y, z, visibility])
+
+                    # Ableton прямой маппинг
+                    if ableton_client is not None and person_idx == 0:
+                        for m in ABLETON_MAP:
+                            src_joint, src_axis = m["source"].split("/")
+                            if src_joint == name and src_axis == "x":
+                                ableton_client.send_message("/live/device/set/parameter/value", [m["track"], m["device"], m["param"], x])
+                            elif src_joint == name and src_axis == "y":
+                                ableton_client.send_message("/live/device/set/parameter/value", [m["track"], m["device"], m["param"], y])
+                            elif src_joint == name and src_axis == "z":
+                                ableton_client.send_message("/live/device/set/parameter/value", [m["track"], m["device"], m["param"], z])
+                            elif src_joint == name and src_axis == "vis":
+                                ableton_client.send_message("/live/device/set/parameter/value", [m["track"], m["device"], m["param"], visibility])
 
                     if OSC_SEND_FLAT:
                         base = f"/pose/{person_idx}/{name}"
