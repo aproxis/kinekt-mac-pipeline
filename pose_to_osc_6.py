@@ -2,7 +2,7 @@
 Multi-person skeleton tracking (Kinect RGB + depth + live tilt) -> OSC (Resolume Arena)
 
 Единый device-хендл Kinect для видео/depth/тилта (без sync API).
-Smoothing координат + детекция жестов + FPS.
+Smoothing координат + детекция жестов + FPS + Web UI.
 
 Требует:
     pip install mediapipe opencv-python python-osc
@@ -13,10 +13,11 @@ Smoothing координат + детекция жестов + FPS.
     python pose_to_osc_6.py
 
 Управление в окне превью: I = тилт вверх, K = тилт вниз, Q = выход.
-Resolume: Preferences -> OSC -> Enable OSC Input, порт 7000.
+Web UI: http://localhost:8080
 """
 
 import socket
+import json
 import time
 import cv2
 import numpy as np
@@ -25,6 +26,10 @@ import mediapipe as mp
 from mediapipe.tasks import python as mp_python
 from mediapipe.tasks.python import vision
 from pythonosc import udp_client
+from pythonosc import osc_message
+import threading
+from http.server import HTTPServer, BaseHTTPRequestHandler
+from urllib.parse import urlparse, parse_qs
 
 try:
     import syphon
@@ -36,9 +41,9 @@ except ImportError:
 
 # ==== НАСТРОЙКИ ====
 OSC_IP = "192.168.1.5"
-OSC_PORT = 7000              # Resolume OSC In
+OSC_PORT = 7000
 MONITOR_OSC_IP = "127.0.0.1"
-MONITOR_OSC_PORT = 9001      # Chataigne / Protokol
+MONITOR_OSC_PORT = 9001
 SEND_TO_MONITOR = True
 SEND_SYPHON = True
 SYPHON_NAME = "KinectSkeleton"
@@ -52,20 +57,16 @@ CONSOLE_PRINT_EVERY_N_FRAMES = 30
 
 OSC_SEND_FLAT = True
 
-CAMERA_SOURCE = "auto"       # "kinect" — только Kinect, "webcam" — MacBook камера,
-                             # "auto" — сначала Kinect, если нет — вебка
-
-SMOOTHING_ALPHA = 0.4        # 0 = без сглаживания, 0.9 = макс сглаживание
+CAMERA_SOURCE = "auto"
+SMOOTHING_ALPHA = 0.4
 
 ABLETON_OSC_IP = "127.0.0.1"
 ABLETON_OSC_PORT = 11000
 SEND_TO_ABLETON = True
-# source: "{joint_name}/{axis}" — ось сустава
-# target: [track, device, param] — адрес параметра в Ableton
-ABLETON_MAP = [
-    {"source": "right_wrist/y", "track": 4, "device": 0, "param": 144},   # LFO Rate
-    {"source": "left_wrist/y",  "track": 4, "device": 0, "param": 148},   # LFO Amt
-]
+
+MAPPINGS_PATH = "mappings.json"
+WEB_HOST = "0.0.0.0"
+WEB_PORT = 8080
 
 DEPTH_MIN_MM = 500
 DEPTH_MAX_MM = 2500
@@ -83,15 +84,20 @@ LANDMARK_NAMES = {
 PERSON_COLORS = [(0, 0, 255), (0, 255, 0), (255, 0, 0), (0, 255, 255)]
 POSE_CONNECTIONS = mp.solutions.pose.POSE_CONNECTIONS
 
-# ==== ГЛОБАЛЬНОЕ ХРАНИЛИЩЕ ПОСЛЕДНИХ КАДРОВ ====
+# ==== ГЛОБАЛЬНОЕ ХРАНИЛИЩЕ ====
 latest_rgb = None
 latest_depth = None
-camera_mode = "none"          # "kinect" или "webcam"
+camera_mode = "none"
 
-# ==== СГЛАЖИВАНИЕ ====
 smooth_state = {}
 
+# ==== STATE FOR WEB UI ====
+joint_state = {}
+joint_state_lock = threading.Lock()
+live_mappings = []
+mappings_lock = threading.Lock()
 
+# ==== СГЛАЖИВАНИЕ ====
 def smooth_val(key, raw, alpha):
     if alpha <= 0:
         return raw
@@ -141,16 +147,12 @@ def draw_person_skeleton(frame, landmarks, color, joint_names=None, show_coords=
             cv2.line(frame, pts[a], pts[b], color, 2)
     for p in pts:
         cv2.circle(frame, p, 4, color, -1)
-
     if show_coords and joint_names:
         for lm_idx, name in joint_names.items():
             lm = landmarks[lm_idx]
             x, y = pts[lm_idx]
             label = f"{name} ({lm.x:.2f},{lm.y:.2f},{lm.z:.2f})"
-            cv2.putText(
-                frame, label, (x + 6, y - 6),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.35, color, 1, cv2.LINE_AA
-            )
+            cv2.putText(frame, label, (x + 6, y - 6), cv2.FONT_HERSHEY_SIMPLEX, 0.35, color, 1, cv2.LINE_AA)
 
 
 def ask_num_poses():
@@ -169,13 +171,161 @@ def ask_initial_tilt():
         return 0
 
 
+# ==== MAPPINGS ====
+def load_mappings():
+    global live_mappings
+    try:
+        with open(MAPPINGS_PATH) as f:
+            data = json.load(f)
+        with mappings_lock:
+            live_mappings = data
+        print(f"Загружено {len(data)} маппингов из {MAPPINGS_PATH}")
+        return data
+    except FileNotFoundError:
+        default = [
+            {"id": 1, "joint": "right_wrist", "axis": "y", "track": 4, "device": 0, "param": 144},
+            {"id": 2, "joint": "left_wrist", "axis": "y", "track": 4, "device": 0, "param": 148},
+        ]
+        save_mappings(default)
+        with mappings_lock:
+            live_mappings = default
+        return default
+
+
+def save_mappings(data):
+    with mappings_lock:
+        live_mappings = data
+    with open(MAPPINGS_PATH, "w") as f:
+        json.dump(data, f, indent=2)
+    print(f"Сохранено {len(data)} маппингов")
+
+
+# ==== ABLETON SCANNER ====
+def ableton_query(address, *args, timeout=3):
+    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    s.settimeout(timeout)
+    s.bind(("0.0.0.0", 0))
+    send_port = s.getsockname()[1]
+    try:
+        msg = osc_message.OscMessage(address)
+        for a in args:
+            if isinstance(a, int):
+                msg.append(a)
+            elif isinstance(a, float):
+                msg.append(a)
+            else:
+                msg.append(str(a))
+        s.sendto(msg.dgram, (ABLETON_OSC_IP, ABLETON_OSC_PORT))
+        data, _ = s.recvfrom(65535)
+        parsed = osc_message.OscMessage(data)
+        return parsed
+    except socket.timeout:
+        return None
+    finally:
+        s.close()
+
+
+def scan_ableton():
+    try:
+        result = ableton_query("/live/song/get/num_tracks")
+        num_tracks = int(result.params[0]) if result else 0
+        tracks = []
+        for t in range(num_tracks):
+            tr = {"index": t, "name": f"Track {t}", "devices": []}
+            name_resp = ableton_query("/live/song/get/track_data", t, t + 1, "track.name")
+            if name_resp and len(name_resp.params) > 0:
+                tr["name"] = str(name_resp.params[0])
+            num_dev = ableton_query("/live/track/get/num_devices", t)
+            num_devices = int(num_dev.params[0]) if num_dev else 0
+            for d in range(num_devices):
+                dev = {"index": d, "name": f"Device {d}", "parameters": []}
+                name_d = ableton_query("/live/track/get/devices/name", t, d)
+                if name_d and len(name_d.params) > 0:
+                    dev["name"] = str(name_d.params[2])
+                num_p = ableton_query("/live/device/get/num_parameters", t, d)
+                num_params = int(num_p.params[2]) if num_p else 0
+                for p in range(min(num_params, 80)):
+                    pn = ableton_query("/live/device/get/parameter/name", t, d, p)
+                    if pn and len(pn.params) > 3:
+                        dev["parameters"].append({"index": p, "name": str(pn.params[3])})
+                tr["devices"].append(dev)
+            tracks.append(tr)
+        return {"tracks": tracks, "total": num_tracks}
+    except Exception as e:
+        return {"error": str(e)}
+
+
+# ==== WEB SERVER ====
+def web_server():
+    class Handler(BaseHTTPRequestHandler):
+        def log_message(self, *a):
+            pass
+
+        def do_GET(self):
+            parsed = urlparse(self.path)
+            path = parsed.path
+
+            if path == "/api/joints":
+                with joint_state_lock:
+                    data = dict(joint_state)
+                self.send_json(data)
+
+            elif path == "/api/mappings":
+                with mappings_lock:
+                    self.send_json(live_mappings)
+
+            elif path == "/api/ableton/scan":
+                self.send_json(scan_ableton())
+
+            elif path == "/":
+                self.send_response(200)
+                self.send_header("Content-Type", "text/html; charset=utf-8")
+                self.end_headers()
+                try:
+                    with open("web/index.html") as f:
+                        self.wfile.write(f.read().encode())
+                except FileNotFoundError:
+                    self.wfile.write(b"<h1>web/index.html not found</h1>")
+
+            else:
+                self.send_json({"error": "not found"}, 404)
+
+        def do_PUT(self):
+            if self.path == "/api/mappings":
+                length = int(self.headers.get("Content-Length", 0))
+                body = self.rfile.read(length)
+                try:
+                    data = json.loads(body)
+                    save_mappings(data)
+                    self.send_json({"ok": True})
+                except Exception as e:
+                    self.send_json({"error": str(e)}, 400)
+            else:
+                self.send_json({"error": "not found"}, 404)
+
+        def send_json(self, data, code=200):
+            self.send_response(code)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Access-Control-Allow-Origin", "*")
+            self.end_headers()
+            self.wfile.write(json.dumps(data).encode())
+
+    server = HTTPServer((WEB_HOST, WEB_PORT), Handler)
+    print(f"Web UI: http://localhost:{WEB_PORT}")
+    server.serve_forever()
+
+
+web_thread = threading.Thread(target=web_server, daemon=True)
+web_thread.start()
+
+
 # ==== ИНИЦИАЛИЗАЦИЯ ====
 NUM_POSES = ask_num_poses()
 current_tilt = ask_initial_tilt()
 
 client = udp_client.SimpleUDPClient(OSC_IP, OSC_PORT)
 monitor_client = udp_client.SimpleUDPClient(MONITOR_OSC_IP, MONITOR_OSC_PORT) if SEND_TO_MONITOR else None
-ableton_client = udp_client.SimpleUDPClient(ABLETON_OSC_IP, ABLETON_OSC_PORT) if SEND_TO_ABLETON and ABLETON_MAP else None
+ableton_client = udp_client.SimpleUDPClient(ABLETON_OSC_IP, ABLETON_OSC_PORT) if SEND_TO_ABLETON else None
 
 client._sock.setblocking(False)
 if monitor_client is not None:
@@ -195,6 +345,8 @@ def send_osc(address, value):
         except (BlockingIOError, OSError):
             pass
 
+
+load_mappings()
 
 base_options = mp_python.BaseOptions(model_asset_path=MODEL_PATH)
 options = vision.PoseLandmarkerOptions(
@@ -225,15 +377,12 @@ def init_kinect():
             freenect.shutdown(ctx)
             ctx = None
             return False
-
         freenect.set_video_mode(dev, freenect.RESOLUTION_MEDIUM, freenect.VIDEO_RGB)
         freenect.set_depth_mode(dev, freenect.RESOLUTION_MEDIUM, freenect.DEPTH_MM)
         freenect.set_video_callback(dev, video_callback)
         freenect.set_depth_callback(dev, depth_callback)
-
         freenect.set_tilt_degs(dev, current_tilt)
         print(f"Tilt выставлен: {current_tilt}°")
-
         freenect.start_video(dev)
         freenect.start_depth(dev)
         return True
@@ -285,8 +434,7 @@ if camera_mode == "webcam":
     print("(тилт доступен только с Kinect)")
 if OSC_SEND_FLAT:
     print("OSC плоские адреса: /pose/{person}/{joint}/{x|y|z|vis}")
-if ableton_client is not None:
-    print(f"AbletonOSC: маппинг {len(ABLETON_MAP)} параметров на :{ABLETON_OSC_PORT}")
+print(f"AbletonOSC: маппинг на :{ABLETON_OSC_PORT} (редактируй в Web UI)")
 if SMOOTHING_ALPHA > 0:
     print(f"Сглаживание: alpha={SMOOTHING_ALPHA}")
 
@@ -310,7 +458,6 @@ prev_gesture_state = {}
 
 try:
     while True:
-        # читаем кадр в зависимости от режима
         if camera_mode == "kinect":
             freenect.process_events(ctx)
             if latest_rgb is None or latest_depth is None:
@@ -341,7 +488,6 @@ try:
         frame_counter += 1
         fps_counter += 1
 
-        # FPS раз в секунду
         now = time.time()
         if now - fps_timer >= 1.0:
             current_fps = fps_counter
@@ -353,6 +499,10 @@ try:
             PRINT_COORDS_TO_CONSOLE and frame_counter % CONSOLE_PRINT_EVERY_N_FRAMES == 0
         )
 
+        # обновляем joint_state для Web UI
+        with joint_state_lock:
+            joint_state.clear()
+
         if result.pose_landmarks:
             people_present = len(result.pose_landmarks)
 
@@ -362,27 +512,29 @@ try:
                 for lm_idx, name in LANDMARK_NAMES.items():
                     lm = landmarks[lm_idx]
 
-                    # сглаживание + отправка
                     a = SMOOTHING_ALPHA
                     x = smooth_val(f"p{person_idx}_{name}_x", round(lm.x, 4), a)
                     y = smooth_val(f"p{person_idx}_{name}_y", round(lm.y, 4), a)
                     z = smooth_val(f"p{person_idx}_{name}_z", round(lm.z, 4), a)
                     visibility = smooth_val(f"p{person_idx}_{name}_vis", round(getattr(lm, "visibility", 1.0), 4), a)
 
+                    # store для Web UI
+                    with joint_state_lock:
+                        joint_state[name] = {"x": x, "y": y, "z": z, "vis": visibility}
+
                     send_osc(f"/pose/{person_idx}/{name}", [x, y, z, visibility])
 
-                    # Ableton прямой маппинг
+                    # Ableton маппинг из JSON
                     if ableton_client is not None and person_idx == 0:
-                        for m in ABLETON_MAP:
-                            src_joint, src_axis = m["source"].split("/")
-                            if src_joint == name and src_axis == "x":
-                                ableton_client.send_message("/live/device/set/parameter/value", [m["track"], m["device"], m["param"], x])
-                            elif src_joint == name and src_axis == "y":
-                                ableton_client.send_message("/live/device/set/parameter/value", [m["track"], m["device"], m["param"], y])
-                            elif src_joint == name and src_axis == "z":
-                                ableton_client.send_message("/live/device/set/parameter/value", [m["track"], m["device"], m["param"], z])
-                            elif src_joint == name and src_axis == "vis":
-                                ableton_client.send_message("/live/device/set/parameter/value", [m["track"], m["device"], m["param"], visibility])
+                        with mappings_lock:
+                            for m in live_mappings:
+                                if m["joint"] == name:
+                                    val = {"x": x, "y": y, "z": z, "vis": visibility}.get(m["axis"])
+                                    if val is not None:
+                                        ableton_client.send_message(
+                                            "/live/device/set/parameter/value",
+                                            [m["track"], m["device"], m["param"], val]
+                                        )
 
                     if OSC_SEND_FLAT:
                         base = f"/pose/{person_idx}/{name}"
@@ -394,7 +546,6 @@ try:
                     if should_print:
                         print(f"person {person_idx} | {name:>14}: x={x:.3f} y={y:.3f} z={z:.3f}")
 
-                # ==== ЖЕСТЫ ====
                 if person_idx == 0:
                     wrist = landmarks[16]
                     shoulder = landmarks[12]
@@ -405,12 +556,12 @@ try:
 
                     gkey = "p0_right_hand_up"
                     if prev_gesture_state.get(gkey) != right_hand_up:
-                        send_osc(f"/gesture/0/right_hand_up", right_hand_up)
+                        send_osc("/gesture/0/right_hand_up", right_hand_up)
                         prev_gesture_state[gkey] = right_hand_up
 
                     gkey = "p0_right_hand_down"
                     if prev_gesture_state.get(gkey) != right_hand_down:
-                        send_osc(f"/gesture/0/right_hand_down", right_hand_down)
+                        send_osc("/gesture/0/right_hand_down", right_hand_down)
                         prev_gesture_state[gkey] = right_hand_down
 
                 if SHOW_PREVIEW:
@@ -419,21 +570,15 @@ try:
                         joint_names=LANDMARK_NAMES, show_coords=SHOW_COORDS_ON_FRAME
                     )
 
-        # Presence changed
         if prev_people_present != people_present:
             send_osc("/pose/presence", people_present)
             prev_people_present = people_present
 
-        # FPS на превью
         if SHOW_PREVIEW:
-            cv2.putText(
-                display_frame, f"FPS: {current_fps}", (10, 30),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2, cv2.LINE_AA
-            )
-            cv2.putText(
-                display_frame, f"People: {people_present}", (10, 55),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2, cv2.LINE_AA
-            )
+            cv2.putText(display_frame, f"FPS: {current_fps}", (10, 30),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2, cv2.LINE_AA)
+            cv2.putText(display_frame, f"People: {people_present}", (10, 55),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2, cv2.LINE_AA)
 
         send_osc("/pose/count", people_present)
 

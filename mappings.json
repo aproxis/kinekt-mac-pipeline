@@ -1,0 +1,18 @@
+[
+  {
+    "id": 1,
+    "joint": "right_wrist",
+    "axis": "y",
+    "track": 4,
+    "device": 0,
+    "param": 144
+  },
+  {
+    "id": 2,
+    "joint": "left_wrist",
+    "axis": "y",
+    "track": 4,
+    "device": 0,
+    "param": 148
+  }
+]

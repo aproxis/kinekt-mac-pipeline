@@ -1,0 +1,237 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Kinekt360 — Mapping</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; background: #111; color: #ddd; height: 100vh; display: flex; }
+h3 { font-size: 11px; text-transform: uppercase; letter-spacing: 1px; color: #666; margin-bottom: 8px; }
+.column { flex: 1; padding: 16px; overflow-y: auto; border-right: 1px solid #222; min-width: 0; }
+.column:last-child { border-right: none; }
+
+.joint-row { display: flex; justify-content: space-between; padding: 4px 8px; border-radius: 4px; cursor: pointer; font-size: 13px; }
+.joint-row:hover { background: #1a1a2e; }
+.joint-row.selected { background: #2a2a4e; outline: 1px solid #4488ff; }
+.joint-name { color: #888; }
+.joint-axis { color: #4488ff; margin: 0 4px; }
+.joint-val { color: #fff; font-family: 'SF Mono', Monaco, monospace; font-size: 12px; }
+
+.track { margin-bottom: 8px; }
+.track-header { display: flex; align-items: center; gap: 8px; padding: 6px 8px; cursor: pointer; border-radius: 4px; font-size: 13px; }
+.track-header:hover { background: #1a1a2e; }
+.track-name { color: #fff; }
+.track-num { color: #555; font-size: 11px; }
+.device { margin-left: 16px; }
+.device-header { padding: 4px 8px; font-size: 12px; color: #aaa; }
+.param-row { display: flex; justify-content: space-between; padding: 3px 8px 3px 24px; cursor: pointer; border-radius: 4px; font-size: 12px; }
+.param-row:hover { background: #1a1a2e; }
+.param-row.selected { background: #2a2a4e; outline: 1px solid #44ff88; }
+.param-name { color: #ccc; }
+.param-idx { color: #555; font-family: monospace; font-size: 10px; }
+
+.mapping-card { background: #1a1a1a; border: 1px solid #2a2a2a; border-radius: 6px; padding: 10px; margin-bottom: 8px; }
+.mapping-card .src { color: #4488ff; font-size: 13px; }
+.mapping-card .arrow { color: #555; margin: 0 8px; }
+.mapping-card .dst { color: #44ff88; font-size: 12px; }
+.mapping-card .del { float: right; background: none; border: none; color: #f44; cursor: pointer; font-size: 16px; }
+.mapping-card .del:hover { color: #f88; }
+
+.btn { background: #2a2a4e; border: none; color: #fff; padding: 8px 16px; border-radius: 6px; cursor: pointer; font-size: 13px; }
+.btn:hover { background: #3a3a6e; }
+.btn-green { background: #1a4a2a; }
+.btn-green:hover { background: #2a6a3a; }
+.btn-red { background: #4a1a1a; }
+.btn-red:hover { background: #6a2a2a; }
+.btn:disabled { opacity: 0.3; cursor: default; }
+
+#add-btn { width: 100%; margin-top: 8px; }
+#save-btn { width: 100%; margin-top: 8px; }
+#scan-btn { width: 100%; margin-bottom: 12px; }
+
+.status { display: flex; gap: 16px; padding: 8px 16px; background: #0a0a0a; border-bottom: 1px solid #222; font-size: 12px; color: #666; }
+.status span { color: #0a0; }
+.loading { color: #888; font-style: italic; font-size: 12px; padding: 8px; }
+</style>
+</head>
+<body>
+
+<div class="status" id="status-bar">
+  Joints: <span id="joint-status">waiting...</span>
+  Ableton: <span id="ableton-status">not scanned</span>
+  Mappings: <span id="mapping-count">0</span>
+</div>
+
+<div class="column" id="joints-col">
+  <h3>Joints</h3>
+  <div id="joints-list"></div>
+</div>
+
+<div class="column" id="ableton-col">
+  <h3>Ableton</h3>
+  <button class="btn" id="scan-btn" onclick="scanAbleton()">⟳ Scan</button>
+  <div id="ableton-tree"></div>
+</div>
+
+<div class="column" id="mappings-col">
+  <h3>Mappings</h3>
+  <div id="mappings-list"></div>
+  <button class="btn btn-green" id="add-btn" disabled onclick="addMapping()">+ Add Mapping</button>
+  <button class="btn" id="save-btn" onclick="saveMappings()">💾 Save</button>
+</div>
+
+<script>
+let selectedJoint = null;
+let selectedParam = null;
+let jointData = {};
+let abletonData = null;
+let mappings = [];
+
+async function api(path, opts = {}) {
+  const r = await fetch('/api' + path, opts);
+  return r.json();
+}
+
+async function loadJoints() {
+  try {
+    const data = await api('/joints');
+    jointData = data;
+    renderJoints();
+    document.getElementById('joint-status').textContent = 'live';
+  } catch { document.getElementById('joint-status').textContent = 'offline'; }
+}
+
+async function loadMappings() {
+  const data = await api('/mappings');
+  mappings = data;
+  renderMappings();
+}
+
+async function scanAbleton() {
+  document.getElementById('ableton-tree').innerHTML = '<div class="loading">Scanning...</div>';
+  document.getElementById('ableton-status').textContent = 'scanning...';
+  try {
+    const data = await api('/ableton/scan');
+    abletonData = data;
+    renderAbleton();
+    document.getElementById('ableton-status').textContent = `${data.tracks || 0} tracks`;
+  } catch {
+    document.getElementById('ableton-tree').innerHTML = '<div class="loading">Scan failed. Live running + AbletonOSC active?</div>';
+    document.getElementById('ableton-status').textContent = 'error';
+  }
+}
+
+function renderJoints() {
+  const el = document.getElementById('joints-list');
+  let html = '';
+  for (const [name, axes] of Object.entries(jointData)) {
+    for (const [axis, val] of Object.entries(axes)) {
+      const key = `${name}/${axis}`;
+      const sel = selectedJoint === key ? 'selected' : '';
+      html += `<div class="joint-row ${sel}" onclick="selectJoint('${key}')">
+        <span><span class="joint-name">${name}</span><span class="joint-axis">/${axis}</span></span>
+        <span class="joint-val">${typeof val === 'number' ? val.toFixed(4) : val}</span>
+      </div>`;
+    }
+  }
+  el.innerHTML = html;
+}
+
+function renderAbleton() {
+  const el = document.getElementById('ableton-tree');
+  if (!abletonData || !abletonData.tracks) { el.innerHTML = '<div class="loading">Press Scan</div>'; return; }
+  let html = '';
+  for (const t of abletonData.tracks) {
+    html += `<div class="track">
+      <div class="track-header" onclick="this.nextElementSibling.style.display = this.nextElementSibling.style.display === 'none' ? '' : 'none'">
+        <span class="track-num">[${t.index}]</span>
+        <span class="track-name">${t.name}</span>
+      </div>
+      <div class="track-devices">`;
+    if (t.devices) for (const d of t.devices) {
+      html += `<div class="device">
+        <div class="device-header" onclick="this.nextElementSibling.style.display = this.nextElementSibling.style.display === 'none' ? '' : 'none'">
+          ${d.name}
+        </div>
+        <div class="device-params">`;
+      if (d.parameters) for (const p of d.parameters) {
+        const key = `${t.index}/${d.index}/${p.index}`;
+        const sel = selectedParam === key ? 'selected' : '';
+        html += `<div class="param-row ${sel}" onclick="selectParam('${key}', ${t.index}, ${d.index}, ${p.index}, '${p.name.replace(/'/g, '\\\'')}')">
+          <span class="param-name">${p.name}</span>
+          <span class="param-idx">#${p.index}</span>
+        </div>`;
+      }
+      html += `</div></div>`;
+    }
+    html += `</div></div>`;
+  }
+  el.innerHTML = html;
+}
+
+function renderMappings() {
+  const el = document.getElementById('mappings-list');
+  document.getElementById('mapping-count').textContent = mappings.length;
+  if (!mappings.length) { el.innerHTML = '<div class="loading">No mappings yet</div>'; return; }
+  let html = '';
+  for (const m of mappings) {
+    html += `<div class="mapping-card">
+      <button class="del" onclick="removeMapping(${m.id})">✕</button>
+      <div><span class="src">${m.joint}/${m.axis}</span><span class="arrow">→</span><span class="dst">Track ${m.track} · Dev ${m.device} · Param #${m.param}</span></div>
+    </div>`;
+  }
+  el.innerHTML = html;
+}
+
+function selectJoint(key) {
+  selectedJoint = key;
+  document.getElementById('add-btn').disabled = !(selectedJoint && selectedParam);
+  renderJoints();
+}
+
+function selectParam(key, track, device, param, name) {
+  selectedParam = key;
+  selectedParamData = { track, device, param, name };
+  document.getElementById('add-btn').disabled = !(selectedJoint && selectedParam);
+  renderAbleton();
+}
+
+async function addMapping() {
+  if (!selectedJoint || !selectedParam) return;
+  const [joint, axis] = selectedJoint.split('/');
+  const maxId = mappings.reduce((m, x) => Math.max(m, x.id || 0), 0);
+  mappings.push({ id: maxId + 1, joint, axis, track: selectedParamData.track, device: selectedParamData.device, param: selectedParamData.param });
+  renderMappings();
+  selectedJoint = null;
+  selectedParam = null;
+  document.getElementById('add-btn').disabled = true;
+  renderJoints();
+  renderAbleton();
+}
+
+async function removeMapping(id) {
+  mappings = mappings.filter(m => m.id !== id);
+  renderMappings();
+}
+
+async function saveMappings() {
+  document.getElementById('save-btn').textContent = 'Saving...';
+  document.getElementById('save-btn').disabled = true;
+  try {
+    await api('/mappings', { method: 'PUT', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(mappings) });
+    document.getElementById('save-btn').textContent = '✅ Saved';
+  } catch {
+    document.getElementById('save-btn').textContent = '❌ Error';
+  }
+  setTimeout(() => {
+    document.getElementById('save-btn').textContent = '💾 Save';
+    document.getElementById('save-btn').disabled = false;
+  }, 2000);
+}
+
+setInterval(loadJoints, 200);
+loadMappings();
+</script>
+</body>
+</html>
