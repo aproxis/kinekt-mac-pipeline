@@ -30,6 +30,7 @@ Every stage is a standalone module. Stages communicate via queues / shared memor
 | `pose_to_osc_4.py` | Dual OSC (Resolume + Protokol), **Syphon** video streaming |
 | `pose_to_osc_5.py` | Flat OSC адреса (`/pose/0/nose/x`), non-blocking сокеты |
 | **`pose_to_osc_6.py`** | Smoothing, жесты (`/gesture/0/right_hand_up`), FPS, **webcam fallback** |
+| `pose_to_osc_7.py` | Per-mapping smoothing/threshold, profiles system, Web UI (joints → param tree → mappings), manual VST3 param mapping |
 
 ## Current State (July 2026)
 
