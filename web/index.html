@@ -175,6 +175,7 @@ let selectedJoint = null;
 let selectedParam = null;
 let selectedParamData = null;
 let jointData = {};
+let jointKeys = new Set();
 let abletonData = null;
 let mappings = [];
 let scanning = false;
@@ -188,12 +189,61 @@ async function loadJoints() {
   try {
     const data = await api('/joints');
     jointData = data;
-    renderJoints();
+    updateJoints();
     document.getElementById('joint-status').textContent = 'live';
     document.getElementById('joint-dot').className = 'dot green';
   } catch {
     document.getElementById('joint-status').textContent = 'offline';
     document.getElementById('joint-dot').className = 'dot red';
+  }
+}
+
+function updateJoints() {
+  const el = document.getElementById('joints-list');
+  const joints = [];
+  for (const [name, axes] of Object.entries(jointData)) {
+    for (const [axis, val] of Object.entries(axes)) {
+      joints.push({ name, axis, val, key: `${name}/${axis}` });
+    }
+  }
+
+  const count = joints.length;
+  document.getElementById('joint-count').textContent = count;
+
+  if (!count) {
+    jointKeys.clear();
+    el.innerHTML = '<div class="no-data">No person in frame</div>';
+    return;
+  }
+
+  const newKeys = new Set(joints.map(j => j.key));
+  const same = jointKeys.size === newKeys.size && [...jointKeys].every(k => newKeys.has(k));
+
+  if (!same) {
+    // rebuild DOM — структура изменилась
+    jointKeys = newKeys;
+    let html = '';
+    for (const j of joints) {
+      const sel = selectedJoint === j.key ? 'selected' : '';
+      html += `<div class="joint-row ${sel}" data-key="${j.key}">
+        <span class="joint-label">${j.name}<span class="axis">/${j.axis}</span></span>
+        <span class="joint-value" id="jv-${j.name}-${j.axis}">${typeof j.val === 'number' ? j.val.toFixed(4) : j.val}</span>
+      </div>`;
+    }
+    el.innerHTML = html;
+    el.querySelectorAll('.joint-row').forEach(r => {
+      r.addEventListener('click', () => selectJoint(r.dataset.key));
+    });
+  } else {
+    // только цифры
+    for (const j of joints) {
+      const span = document.getElementById(`jv-${j.name}-${j.axis}`);
+      if (span) span.textContent = typeof j.val === 'number' ? j.val.toFixed(4) : j.val;
+    }
+    // класс selected
+    el.querySelectorAll('.joint-row').forEach(r => {
+      r.classList.toggle('selected', r.dataset.key === selectedJoint);
+    });
   }
 }
 
@@ -232,26 +282,6 @@ async function scanAbleton() {
     btn.disabled = false;
     btn.innerHTML = '⟳ Scan';
   }
-}
-
-function renderJoints() {
-  const el = document.getElementById('joints-list');
-  const count = Object.keys(jointData).length;
-  document.getElementById('joint-count').textContent = count;
-  if (!count) { el.innerHTML = '<div class="no-data">No person in frame</div>'; return; }
-
-  let html = '';
-  for (const [name, axes] of Object.entries(jointData)) {
-    for (const [axis, val] of Object.entries(axes)) {
-      const key = `${name}/${axis}`;
-      const sel = selectedJoint === key ? 'selected' : '';
-      html += `<div class="joint-row ${sel}" onclick="selectJoint('${key}')">
-        <span class="joint-label">${name}<span class="axis">/${axis}</span></span>
-        <span class="joint-value">${typeof val === 'number' ? val.toFixed(4) : val}</span>
-      </div>`;
-    }
-  }
-  el.innerHTML = html;
 }
 
 function renderAbleton() {
@@ -347,7 +377,7 @@ function renderMappings() {
 function selectJoint(key) {
   selectedJoint = key;
   updateAddBtn();
-  renderJoints();
+  updateJoints();
 }
 
 function selectParam(key, track, device, param, name) {
@@ -371,7 +401,7 @@ async function addMapping() {
   selectedParam = null;
   selectedParamData = null;
   updateAddBtn();
-  renderJoints();
+  updateJoints();
   renderAbleton();
   // auto-save
   await doSave();
