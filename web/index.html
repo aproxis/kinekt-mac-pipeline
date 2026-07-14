@@ -6,87 +6,178 @@
 <title>Kinekt360 — Mapping</title>
 <style>
 * { margin: 0; padding: 0; box-sizing: border-box; }
-body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; background: #111; color: #ddd; height: 100vh; display: flex; }
-h3 { font-size: 11px; text-transform: uppercase; letter-spacing: 1px; color: #666; margin-bottom: 8px; }
-.column { flex: 1; padding: 16px; overflow-y: auto; border-right: 1px solid #222; min-width: 0; }
-.column:last-child { border-right: none; }
+body {
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+  background: #0d0d0f; color: #d4d4d8;
+  height: 100vh; display: flex; flex-direction: column;
+  overflow: hidden;
+}
+/* ── status bar ── */
+.status {
+  display: flex; gap: 24px; align-items: center;
+  padding: 6px 16px; min-height: 32px;
+  background: #161618; border-bottom: 1px solid #27272a;
+  font-size: 12px; color: #71717a; flex-shrink: 0;
+}
+.status .dot { display: inline-block; width: 6px; height: 6px; border-radius: 50%; margin-right: 6px; }
+.status .dot.green { background: #22c55e; }
+.status .dot.yellow { background: #eab308; }
+.status .dot.red { background: #ef4444; }
+.status .dot.gray { background: #52525b; }
+.status-item { display: flex; align-items: center; gap: 4px; }
+.status-item strong { color: #a1a1aa; font-weight: 500; }
 
-.joint-row { display: flex; justify-content: space-between; padding: 4px 8px; border-radius: 4px; cursor: pointer; font-size: 13px; }
-.joint-row:hover { background: #1a1a2e; }
-.joint-row.selected { background: #2a2a4e; outline: 1px solid #4488ff; }
-.joint-name { color: #888; }
-.joint-axis { color: #4488ff; margin: 0 4px; }
-.joint-val { color: #fff; font-family: 'SF Mono', Monaco, monospace; font-size: 12px; }
+/* ── columns ── */
+.columns { display: flex; flex: 1; min-height: 0; }
+.col {
+  display: flex; flex-direction: column;
+  flex: 1; min-width: 0; border-right: 1px solid #27272a;
+}
+.col:last-child { border-right: none; }
+.col-header {
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 10px 12px 8px;
+  font-size: 11px; font-weight: 600; text-transform: uppercase;
+  letter-spacing: 0.8px; color: #52525b;
+  border-bottom: 1px solid #18181b;
+  flex-shrink: 0;
+}
+.col-header .badge {
+  font-size: 10px; color: #71717a;
+  background: #18181b; padding: 1px 8px; border-radius: 10px;
+}
+.col-body { flex: 1; overflow-y: auto; padding: 4px; }
 
-.track { margin-bottom: 8px; }
-.track-header { display: flex; align-items: center; gap: 8px; padding: 6px 8px; cursor: pointer; border-radius: 4px; font-size: 13px; }
-.track-header:hover { background: #1a1a2e; }
-.track-name { color: #fff; }
-.track-num { color: #555; font-size: 11px; }
-.device { margin-left: 16px; }
-.device-header { padding: 4px 8px; font-size: 12px; color: #aaa; }
-.param-row { display: flex; justify-content: space-between; padding: 3px 8px 3px 24px; cursor: pointer; border-radius: 4px; font-size: 12px; }
-.param-row:hover { background: #1a1a2e; }
-.param-row.selected { background: #2a2a4e; outline: 1px solid #44ff88; }
-.param-name { color: #ccc; }
-.param-idx { color: #555; font-family: monospace; font-size: 10px; }
+/* ── joints ── */
+.joint-row {
+  display: flex; justify-content: space-between; align-items: center;
+  padding: 5px 10px; margin: 1px 0; border-radius: 4px;
+  cursor: pointer; font-size: 13px; transition: background 0.1s;
+}
+.joint-row:hover { background: #1c1c22; }
+.joint-row.selected { background: #1e1e3a; outline: 1px solid #3b3b80; }
+.joint-label { color: #a1a1aa; }
+.joint-label .axis { color: #6366f1; }
+.joint-value {
+  font-family: 'SF Mono', 'Cascadia Code', monospace;
+  font-size: 12px; color: #d4d4d8; min-width: 56px; text-align: right;
+}
+.no-data { color: #52525b; font-size: 12px; padding: 24px; text-align: center; }
 
-.mapping-card { background: #1a1a1a; border: 1px solid #2a2a2a; border-radius: 6px; padding: 10px; margin-bottom: 8px; }
-.mapping-card .src { color: #4488ff; font-size: 13px; }
-.mapping-card .arrow { color: #555; margin: 0 8px; }
-.mapping-card .dst { color: #44ff88; font-size: 12px; }
-.mapping-card .del { float: right; background: none; border: none; color: #f44; cursor: pointer; font-size: 16px; }
-.mapping-card .del:hover { color: #f88; }
+/* ── Ableton tree ── */
+.tree-track { margin-bottom: 2px; }
+.tree-track-header {
+  display: flex; align-items: center; gap: 6px;
+  padding: 5px 8px; border-radius: 4px; cursor: pointer; font-size: 13px;
+}
+.tree-track-header:hover { background: #1c1c22; }
+.tree-track-header .arrow { color: #52525b; font-size: 10px; transition: transform 0.15s; }
+.tree-track-header .arrow.open { transform: rotate(90deg); }
+.track-name { color: #e4e4e7; }
+.track-idx { color: #52525b; font-size: 11px; }
 
-.btn { background: #2a2a4e; border: none; color: #fff; padding: 8px 16px; border-radius: 6px; cursor: pointer; font-size: 13px; }
-.btn:hover { background: #3a3a6e; }
-.btn-green { background: #1a4a2a; }
-.btn-green:hover { background: #2a6a3a; }
-.btn-red { background: #4a1a1a; }
-.btn-red:hover { background: #6a2a2a; }
-.btn:disabled { opacity: 0.3; cursor: default; }
+.tree-device { margin: 1px 0 1px 16px; }
+.tree-device-header {
+  display: flex; align-items: center; gap: 6px;
+  padding: 4px 8px; border-radius: 4px; cursor: pointer; font-size: 12px;
+}
+.tree-device-header:hover { background: #1c1c22; }
+.tree-device-header .arrow { color: #52525b; font-size: 10px; transition: transform 0.15s; }
+.tree-device-header .arrow.open { transform: rotate(90deg); }
+.device-name { color: #a1a1aa; }
 
-#add-btn { width: 100%; margin-top: 8px; }
-#save-btn { width: 100%; margin-top: 8px; }
-#scan-btn { width: 100%; margin-bottom: 12px; }
+.param-row {
+  display: flex; justify-content: space-between; align-items: center;
+  padding: 3px 8px 3px 28px; margin: 1px 0;
+  border-radius: 4px; cursor: pointer; font-size: 12px; transition: background 0.1s;
+}
+.param-row:hover { background: #1c1c22; }
+.param-row.selected { background: #14281d; outline: 1px solid #166534; }
+.param-idx { color: #52525b; font-family: monospace; font-size: 10px; }
 
-.status { display: flex; gap: 16px; padding: 8px 16px; background: #0a0a0a; border-bottom: 1px solid #222; font-size: 12px; color: #666; }
-.status span { color: #0a0; }
-.loading { color: #888; font-style: italic; font-size: 12px; padding: 8px; }
+/* ── mappings ── */
+.map-card {
+  background: #161618; border: 1px solid #27272a;
+  border-radius: 6px; padding: 8px 10px; margin: 4px 8px;
+  position: relative;
+}
+.map-card .del {
+  position: absolute; top: 6px; right: 8px;
+  background: none; border: none; color: #a1a1aa; cursor: pointer;
+  font-size: 15px; line-height: 1; padding: 2px 4px; border-radius: 3px;
+}
+.map-card .del:hover { background: #1c1c22; color: #ef4444; }
+.map-src { color: #6366f1; font-size: 13px; font-weight: 500; }
+.map-arrow { color: #52525b; margin: 0 6px; font-size: 12px; }
+.map-dst { color: #22c55e; font-size: 12px; }
+
+/* ── buttons ── */
+.btn {
+  display: inline-flex; align-items: center; justify-content: center; gap: 6px;
+  background: #18181b; border: 1px solid #27272a;
+  color: #d4d4d8; padding: 7px 14px; border-radius: 5px;
+  cursor: pointer; font-size: 13px; font-weight: 500;
+  transition: background 0.15s, border-color 0.15s;
+}
+.btn:hover { background: #1c1c22; border-color: #3f3f46; }
+.btn:active { background: #27272a; }
+.btn:disabled { opacity: 0.35; cursor: not-allowed; }
+.btn-primary { background: #1a1a3a; border-color: #3b3b80; color: #a5b4fc; }
+.btn-primary:hover:not(:disabled) { background: #24245a; border-color: #6366f1; }
+.btn-green { background: #0f2a1a; border-color: #166534; color: #86efac; }
+.btn-green:hover:not(:disabled) { background: #143d24; border-color: #22c55e; }
+.btn-red { background: #2a0f0f; border-color: #991b1b; color: #fca5a5; }
+
+.col-actions { padding: 8px; display: flex; flex-direction: column; gap: 6px; flex-shrink: 0; border-top: 1px solid #18181b; }
+.col-actions .btn { width: 100%; }
+
+/* ── spinner ── */
+.spinner { display: inline-block; width: 12px; height: 12px; border: 2px solid #52525b; border-top-color: #6366f1; border-radius: 50%; animation: spin 0.6s linear infinite; }
+@keyframes spin { to { transform: rotate(360deg); } }
 </style>
 </head>
 <body>
 
-<div class="status" id="status-bar">
-  Joints: <span id="joint-status">waiting...</span>
-  Ableton: <span id="ableton-status">not scanned</span>
-  Mappings: <span id="mapping-count">0</span>
+<div class="status">
+  <span class="status-item"><span class="dot green" id="joint-dot"></span><strong>Joints</strong> <span id="joint-status">waiting</span></span>
+  <span class="status-item"><span class="dot yellow" id="ableton-dot"></span><strong>Ableton</strong> <span id="ableton-status">not scanned</span></span>
+  <span class="status-item"><span class="dot gray" id="map-dot"></span><strong>Mappings</strong> <span id="map-status">0</span></span>
 </div>
 
-<div class="column" id="joints-col">
-  <h3>Joints</h3>
-  <div id="joints-list"></div>
-</div>
+<div class="columns">
+  <div class="col">
+    <div class="col-header">Joints <span class="badge" id="joint-count">0</span></div>
+    <div class="col-body" id="joints-list"><div class="no-data">Waiting for camera...</div></div>
+  </div>
 
-<div class="column" id="ableton-col">
-  <h3>Ableton</h3>
-  <button class="btn" id="scan-btn" onclick="scanAbleton()">⟳ Scan</button>
-  <div id="ableton-tree"></div>
-</div>
+  <div class="col">
+    <div class="col-header">
+      Ableton
+      <button class="btn" id="scan-btn" onclick="scanAbleton()" style="font-size:11px;padding:3px 10px;">
+        ⟳ Scan
+      </button>
+    </div>
+    <div class="col-body" id="ableton-tree"><div class="no-data">Press Scan to discover devices</div></div>
+  </div>
 
-<div class="column" id="mappings-col">
-  <h3>Mappings</h3>
-  <div id="mappings-list"></div>
-  <button class="btn btn-green" id="add-btn" disabled onclick="addMapping()">+ Add Mapping</button>
-  <button class="btn" id="save-btn" onclick="saveMappings()">💾 Save</button>
+  <div class="col">
+    <div class="col-header">Mappings <span class="badge" id="map-count">0</span></div>
+    <div class="col-body" id="mappings-list"><div class="no-data">No mappings</div></div>
+    <div class="col-actions">
+      <button class="btn btn-green" id="add-btn" disabled onclick="addMapping()">+ Add Mapping</button>
+      <button class="btn btn-primary" id="save-btn" onclick="saveMappings()">Save to File</button>
+    </div>
+  </div>
 </div>
 
 <script>
 let selectedJoint = null;
 let selectedParam = null;
+let selectedParamData = null;
 let jointData = {};
 let abletonData = null;
 let mappings = [];
+let scanning = false;
 
 async function api(path, opts = {}) {
   const r = await fetch('/api' + path, opts);
@@ -99,39 +190,64 @@ async function loadJoints() {
     jointData = data;
     renderJoints();
     document.getElementById('joint-status').textContent = 'live';
-  } catch { document.getElementById('joint-status').textContent = 'offline'; }
+    document.getElementById('joint-dot').className = 'dot green';
+  } catch {
+    document.getElementById('joint-status').textContent = 'offline';
+    document.getElementById('joint-dot').className = 'dot red';
+  }
 }
 
 async function loadMappings() {
-  const data = await api('/mappings');
-  mappings = data;
-  renderMappings();
+  try {
+    const data = await api('/mappings');
+    mappings = data;
+    renderMappings();
+  } catch {}
 }
 
 async function scanAbleton() {
-  document.getElementById('ableton-tree').innerHTML = '<div class="loading">Scanning...</div>';
+  if (scanning) return;
+  scanning = true;
+  const btn = document.getElementById('scan-btn');
+  btn.disabled = true;
+  btn.innerHTML = '<span class="spinner"></span> Scanning...';
   document.getElementById('ableton-status').textContent = 'scanning...';
+  document.getElementById('ableton-dot').className = 'dot yellow';
+  document.getElementById('ableton-tree').innerHTML = '<div class="no-data">Scanning tracks & devices…</div>';
+
   try {
     const data = await api('/ableton/scan');
+    if (data.error) throw new Error(data.error);
     abletonData = data;
+    const count = (data.tracks || []).length;
     renderAbleton();
-    document.getElementById('ableton-status').textContent = `${data.tracks || 0} tracks`;
-  } catch {
-    document.getElementById('ableton-tree').innerHTML = '<div class="loading">Scan failed. Live running + AbletonOSC active?</div>';
+    document.getElementById('ableton-status').textContent = `${count} tracks`;
+    document.getElementById('ableton-dot').className = 'dot green';
+  } catch (e) {
+    document.getElementById('ableton-tree').innerHTML = `<div class="no-data">Scan failed<br><span style="color:#52525b;font-size:11px">${e.message}</span></div>`;
     document.getElementById('ableton-status').textContent = 'error';
+    document.getElementById('ableton-dot').className = 'dot red';
+  } finally {
+    scanning = false;
+    btn.disabled = false;
+    btn.innerHTML = '⟳ Scan';
   }
 }
 
 function renderJoints() {
   const el = document.getElementById('joints-list');
+  const count = Object.keys(jointData).length;
+  document.getElementById('joint-count').textContent = count;
+  if (!count) { el.innerHTML = '<div class="no-data">No person in frame</div>'; return; }
+
   let html = '';
   for (const [name, axes] of Object.entries(jointData)) {
     for (const [axis, val] of Object.entries(axes)) {
       const key = `${name}/${axis}`;
       const sel = selectedJoint === key ? 'selected' : '';
       html += `<div class="joint-row ${sel}" onclick="selectJoint('${key}')">
-        <span><span class="joint-name">${name}</span><span class="joint-axis">/${axis}</span></span>
-        <span class="joint-val">${typeof val === 'number' ? val.toFixed(4) : val}</span>
+        <span class="joint-label">${name}<span class="axis">/${axis}</span></span>
+        <span class="joint-value">${typeof val === 'number' ? val.toFixed(4) : val}</span>
       </div>`;
     }
   }
@@ -140,26 +256,48 @@ function renderJoints() {
 
 function renderAbleton() {
   const el = document.getElementById('ableton-tree');
-  if (!abletonData || !abletonData.tracks) { el.innerHTML = '<div class="loading">Press Scan</div>'; return; }
+  if (!abletonData || !abletonData.tracks || !abletonData.tracks.length) {
+    el.innerHTML = '<div class="no-data">No tracks found</div>';
+    return;
+  }
   let html = '';
   for (const t of abletonData.tracks) {
-    html += `<div class="track">
-      <div class="track-header" onclick="this.nextElementSibling.style.display = this.nextElementSibling.style.display === 'none' ? '' : 'none'">
-        <span class="track-num">[${t.index}]</span>
+    if (!t.devices || !t.devices.length) {
+      html += `<div class="tree-track">
+        <div class="tree-track-header" style="cursor:default">
+          <span class="track-idx">[${t.index}]</span>
+          <span class="track-name">${t.name}</span>
+        </div>
+      </div>`;
+      continue;
+    }
+    html += `<div class="tree-track">
+      <div class="tree-track-header" data-toggle="1">
+        <span class="arrow open">▶</span>
+        <span class="track-idx">[${t.index}]</span>
         <span class="track-name">${t.name}</span>
       </div>
-      <div class="track-devices">`;
-    if (t.devices) for (const d of t.devices) {
-      html += `<div class="device">
-        <div class="device-header" onclick="this.nextElementSibling.style.display = this.nextElementSibling.style.display === 'none' ? '' : 'none'">
-          ${d.name}
+      <div class="tree-devices">`;
+    for (const d of t.devices) {
+      if (!d.parameters || !d.parameters.length) {
+        html += `<div class="tree-device">
+          <div class="tree-device-header" style="cursor:default">
+            <span class="device-name">${d.name}</span>
+          </div>
+        </div>`;
+        continue;
+      }
+      html += `<div class="tree-device">
+        <div class="tree-device-header" data-toggle="2">
+          <span class="arrow open">▶</span>
+          <span class="device-name">${d.name}</span>
         </div>
         <div class="device-params">`;
-      if (d.parameters) for (const p of d.parameters) {
+      for (const p of d.parameters) {
         const key = `${t.index}/${d.index}/${p.index}`;
         const sel = selectedParam === key ? 'selected' : '';
-        html += `<div class="param-row ${sel}" onclick="selectParam('${key}', ${t.index}, ${d.index}, ${p.index}, '${p.name.replace(/'/g, '\\\'')}')">
-          <span class="param-name">${p.name}</span>
+        html += `<div class="param-row ${sel}" data-key="${key}" data-track="${t.index}" data-device="${d.index}" data-param="${p.index}" data-name="${p.name.replace(/"/g, '&quot;')}">
+          <span>${p.name}</span>
           <span class="param-idx">#${p.index}</span>
         </div>`;
       }
@@ -168,17 +306,39 @@ function renderAbleton() {
     html += `</div></div>`;
   }
   el.innerHTML = html;
+
+  // collapse/expand with data attributes
+  el.querySelectorAll('[data-toggle]').forEach(h => {
+    h.addEventListener('click', () => {
+      const target = h.nextElementSibling;
+      if (!target) return;
+      const hidden = target.style.display === 'none';
+      target.style.display = hidden ? '' : 'none';
+      h.querySelector('.arrow').classList.toggle('open', hidden);
+    });
+  });
+  // param click
+  el.querySelectorAll('.param-row').forEach(r => {
+    r.addEventListener('click', () => {
+      selectParam(r.dataset.key, +r.dataset.track, +r.dataset.device, +r.dataset.param, r.dataset.name);
+    });
+  });
 }
 
 function renderMappings() {
   const el = document.getElementById('mappings-list');
-  document.getElementById('mapping-count').textContent = mappings.length;
-  if (!mappings.length) { el.innerHTML = '<div class="loading">No mappings yet</div>'; return; }
+  const count = mappings.length;
+  document.getElementById('map-count').textContent = count;
+  document.getElementById('map-status').textContent = count;
+  document.getElementById('map-dot').className = count ? 'dot green' : 'dot gray';
+
+  if (!count) { el.innerHTML = '<div class="no-data">No mappings yet.<br>Select a joint + Ableton param, then Add.</div>'; return; }
+
   let html = '';
   for (const m of mappings) {
-    html += `<div class="mapping-card">
+    html += `<div class="map-card">
       <button class="del" onclick="removeMapping(${m.id})">✕</button>
-      <div><span class="src">${m.joint}/${m.axis}</span><span class="arrow">→</span><span class="dst">Track ${m.track} · Dev ${m.device} · Param #${m.param}</span></div>
+      <div><span class="map-src">${m.joint}/${m.axis}</span><span class="map-arrow">→</span><span class="map-dst">Track ${m.track} · Dev ${m.device} · #${m.param}</span></div>
     </div>`;
   }
   el.innerHTML = html;
@@ -186,48 +346,61 @@ function renderMappings() {
 
 function selectJoint(key) {
   selectedJoint = key;
-  document.getElementById('add-btn').disabled = !(selectedJoint && selectedParam);
+  updateAddBtn();
   renderJoints();
 }
 
 function selectParam(key, track, device, param, name) {
   selectedParam = key;
   selectedParamData = { track, device, param, name };
-  document.getElementById('add-btn').disabled = !(selectedJoint && selectedParam);
+  updateAddBtn();
   renderAbleton();
 }
 
+function updateAddBtn() {
+  document.getElementById('add-btn').disabled = !(selectedJoint && selectedParam);
+}
+
 async function addMapping() {
-  if (!selectedJoint || !selectedParam) return;
+  if (!selectedJoint || !selectedParamData) return;
   const [joint, axis] = selectedJoint.split('/');
   const maxId = mappings.reduce((m, x) => Math.max(m, x.id || 0), 0);
   mappings.push({ id: maxId + 1, joint, axis, track: selectedParamData.track, device: selectedParamData.device, param: selectedParamData.param });
   renderMappings();
   selectedJoint = null;
   selectedParam = null;
-  document.getElementById('add-btn').disabled = true;
+  selectedParamData = null;
+  updateAddBtn();
   renderJoints();
   renderAbleton();
+  // auto-save
+  await doSave();
 }
 
 async function removeMapping(id) {
   mappings = mappings.filter(m => m.id !== id);
   renderMappings();
+  await doSave();
+}
+
+async function doSave() {
+  const btn = document.getElementById('save-btn');
+  btn.disabled = true;
+  btn.textContent = 'Saving...';
+  try {
+    await api('/mappings', { method: 'PUT', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(mappings) });
+    btn.textContent = '✅ Saved';
+  } catch {
+    btn.textContent = '❌ Error';
+  }
+  setTimeout(() => {
+    btn.disabled = false;
+    btn.textContent = 'Save to File';
+  }, 1500);
 }
 
 async function saveMappings() {
-  document.getElementById('save-btn').textContent = 'Saving...';
-  document.getElementById('save-btn').disabled = true;
-  try {
-    await api('/mappings', { method: 'PUT', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(mappings) });
-    document.getElementById('save-btn').textContent = '✅ Saved';
-  } catch {
-    document.getElementById('save-btn').textContent = '❌ Error';
-  }
-  setTimeout(() => {
-    document.getElementById('save-btn').textContent = '💾 Save';
-    document.getElementById('save-btn').disabled = false;
-  }, 2000);
+  await doSave();
 }
 
 setInterval(loadJoints, 200);
