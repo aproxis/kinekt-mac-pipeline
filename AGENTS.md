@@ -28,16 +28,21 @@ Every stage is a standalone module. Stages communicate via queues / shared memor
 | `pose_to_osc_2.py` | Retry-механика при ошибках чтения кадра |
 | `pose_to_osc_3.py` | **Callback-based capture**, единый `open_device()` на всё время, тилт без LIBUSB_ERROR_ACCESS |
 | `pose_to_osc_4.py` | Dual OSC (Resolume + Protokol), **Syphon** video streaming |
-| **`pose_to_osc_5.py`** | Flat OSC адреса (`/pose/0/nose/x`), non-blocking сокеты |
+| `pose_to_osc_5.py` | Flat OSC адреса (`/pose/0/nose/x`), non-blocking сокеты |
+| **`pose_to_osc_6.py`** | Smoothing, жесты (`/gesture/0/right_hand_up`), FPS, **webcam fallback** |
 
 ## Current State (July 2026)
 
-- **pose_to_osc_5.py** — текущий рабочий скрипт
+- **pose_to_osc_6.py** — текущий рабочий скрипт
 - Callback-based захват через `video_callback`/`depth_callback` + `freenect.process_events()`
 - Dual OSC: Resolume на `192.168.1.5:7000` + локальный порт `9001` для Chataigne/Protokol
 - Syphon-сервер `KinectSkeleton` — живое видео с масками и скелетом в Resolume
 - Non-blocking сокеты — не крешится при отсутствии Resolume
-- Chataigne — OSC-транслятор для гибкого маппинга жестов на параметры Resolume
+- Smoothing координат — экспоненциальный фильтр (SMOOTHING_ALPHA)
+- Жесты — `/gesture/0/right_hand_up`, `/gesture/0/right_hand_down`
+- FPS — счётчик на превью + OSC `/fps`
+- Присутствие — `/pose/presence` при входе/выходе человека из кадра
+- Webcam fallback — если Kinect не подключён, автоматически использует MacBook камеру
 - Protokol — мониторинг всех OSC-сообщений в реальном времени
 - `pose_landmarker.task` — MediaPipe pose landmarker model
 - `freenect-python/` — Python CFFI bindings for libfreenect
@@ -53,7 +58,8 @@ Kinekt360/
 ├── pose_to_osc_2.py           # v2 — retries
 ├── pose_to_osc_3.py           # v3 — callback-based, single handle
 ├── pose_to_osc_4.py           # v4 — dual OSC + Syphon
-├── pose_to_osc_5.py           # v5 — flat OSC + non-blocking (current)
+├── pose_to_osc_5.py           # v5 — flat OSC + non-blocking
+├── pose_to_osc_6.py           # v6 — smoothing, gestures, FPS, webcam (current)
 ├── pose_landmarker.task       # MediaPipe model (gitignored)
 ├── freenect-python/           # libfreenect Python bindings
 ├── venv/                      # Python virtual environment
