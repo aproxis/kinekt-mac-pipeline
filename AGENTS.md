@@ -30,11 +30,11 @@ Every stage is a standalone module. Stages communicate via queues / shared memor
 | `pose_to_osc_4.py` | Dual OSC (Resolume + Protokol), **Syphon** video streaming |
 | `pose_to_osc_5.py` | Flat OSC адреса (`/pose/0/nose/x`), non-blocking сокеты |
 | **`pose_to_osc_6.py`** | Smoothing, жесты (`/gesture/0/right_hand_up`), FPS, **webcam fallback** |
-| `pose_to_osc_7.py` | Per-mapping smoothing/threshold, profiles system, Web UI (joints → param tree → mappings), manual VST3 param mapping |
+| **`pose_to_osc_7.py`** | Per-mapping smoothing/threshold, profiles system, Web UI (joints → param tree → mappings), manual VST3 param mapping, normalization (min/max), invert, joint grouping |
 
 ## Current State (July 2026)
 
-- **pose_to_osc_6.py** — текущий рабочий скрипт
+- **pose_to_osc_7.py** — текущий рабочий скрипт
 - Callback-based захват через `video_callback`/`depth_callback` + `freenect.process_events()`
 - Dual OSC: Resolume на `192.168.1.5:7000` + локальный порт `9001` для Chataigne/Protokol
 - Syphon-сервер `KinectSkeleton` — живое видео с масками и скелетом в Resolume
@@ -44,10 +44,12 @@ Every stage is a standalone module. Stages communicate via queues / shared memor
 - FPS — счётчик на превью + OSC `/fps`
 - Присутствие — `/pose/presence` при входе/выходе человека из кадра
 - Webcam fallback — если Kinect не подключён, автоматически использует MacBook камеру
-- Protokol — мониторинг всех OSC-сообщений в реальном времени
-- `pose_landmarker.task` — MediaPipe pose landmarker model
-- `freenect-python/` — Python CFFI bindings for libfreenect
-- `libfreenect` installed via Homebrew at `/opt/homebrew/lib/`
+- **Web UI** (`http://localhost:8080`) — live joints, Ableton scanner, mapping editor, profile manager
+- **Profiles** — `profiles/*.json`, переключение через dropdown в Web UI
+- **Normalization** — joint 0-1 → реальный диапазон параметра (min/max из Ableton)
+- **Per-mapping** — smoothing, threshold, scale, invert — каждый mapping настраивается отдельно
+- **Manual param** — для VST3 плагинов с ограниченным экспортом параметров (Configure в Live)
+- **Protokol** — мониторинг всех OSC-сообщений в реальном времени
 
 ## Directory Structure
 
@@ -60,7 +62,8 @@ Kinekt360/
 ├── pose_to_osc_3.py           # v3 — callback-based, single handle
 ├── pose_to_osc_4.py           # v4 — dual OSC + Syphon
 ├── pose_to_osc_5.py           # v5 — flat OSC + non-blocking
-├── pose_to_osc_6.py           # v6 — smoothing, gestures, FPS, webcam (current)
+├── pose_to_osc_6.py           # v6 — smoothing, gestures, FPS, webcam
+├── pose_to_osc_7.py           # v7 — per-mapping smoothing, Web UI, profiles, normalization, invert (current)
 ├── pose_landmarker.task       # MediaPipe model (gitignored)
 ├── freenect-python/           # libfreenect Python bindings
 ├── venv/                      # Python virtual environment
