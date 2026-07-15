@@ -202,6 +202,17 @@ let abletonData = null;
 let mappings = [];
 let scanning = false;
 
+const JOINT_GROUPS = [
+  { label: 'Head', items: ['nose'] },
+  { label: 'Shoulders', items: ['left_shoulder', 'right_shoulder'] },
+  { label: 'Arms', items: ['left_elbow', 'right_elbow', 'left_wrist', 'right_wrist'] },
+  { label: 'Hips', items: ['left_hip', 'right_hip'] },
+  { label: 'Legs', items: ['left_knee', 'right_knee', 'left_ankle', 'right_ankle'] },
+];
+
+const JOINT_ORDER = {};
+JOINT_GROUPS.forEach((g, gi) => g.items.forEach((j, ji) => { JOINT_ORDER[j] = gi * 100 + ji; }));
+
 async function api(path, opts = {}) {
   const r = await fetch('/api' + path, opts);
   return r.json();
@@ -222,14 +233,7 @@ async function loadJoints() {
 
 function updateJoints() {
   const el = document.getElementById('joints-list');
-  const joints = [];
-  for (const [name, axes] of Object.entries(jointData)) {
-    for (const [axis, val] of Object.entries(axes)) {
-      joints.push({ name, axis, val, key: `${name}/${axis}` });
-    }
-  }
-
-  const count = joints.length;
+  const count = Object.keys(jointData).length;
   document.getElementById('joint-count').textContent = count;
 
   if (!count) {
@@ -238,14 +242,36 @@ function updateJoints() {
     return;
   }
 
-  const newKeys = new Set(joints.map(j => j.key));
+  const newKeys = new Set();
+  const flat = [];
+  for (const [name, axes] of Object.entries(jointData)) {
+    for (const [axis, val] of Object.entries(axes)) {
+      flat.push({ name, axis, val, key: `${name}/${axis}` });
+      newKeys.add(`${name}/${axis}`);
+    }
+  }
+
   const same = jointKeys.size === newKeys.size && [...jointKeys].every(k => newKeys.has(k));
+  jointKeys = newKeys;
+
+  // order joints by JOINT_ORDER, then axis
+  const axisOrder = { x: 0, y: 1, z: 2, vis: 3 };
+  flat.sort((a, b) => {
+    const oa = JOINT_ORDER[a.name] ?? 999;
+    const ob = JOINT_ORDER[b.name] ?? 999;
+    if (oa !== ob) return oa - ob;
+    return (axisOrder[a.axis] ?? 9) - (axisOrder[b.axis] ?? 9);
+  });
 
   if (!same) {
-    // rebuild DOM — структура изменилась
-    jointKeys = newKeys;
     let html = '';
-    for (const j of joints) {
+    let lastGroup = -1;
+    for (const j of flat) {
+      const grp = JOINT_GROUPS.findIndex(g => g.items.includes(j.name));
+      if (grp !== -1 && grp !== lastGroup) {
+        html += `<div style="font-size:10px;color:#52525b;padding:8px 10px 2px;text-transform:uppercase;letter-spacing:0.5px">${JOINT_GROUPS[grp].label}</div>`;
+        lastGroup = grp;
+      }
       const sel = selectedJoint === j.key ? 'selected' : '';
       html += `<div class="joint-row ${sel}" data-key="${j.key}">
         <span class="joint-label">${j.name}<span class="axis">/${j.axis}</span></span>
@@ -257,12 +283,10 @@ function updateJoints() {
       r.addEventListener('click', () => selectJoint(r.dataset.key));
     });
   } else {
-    // только цифры
-    for (const j of joints) {
+    for (const j of flat) {
       const span = document.getElementById(`jv-${j.name}-${j.axis}`);
       if (span) span.textContent = typeof j.val === 'number' ? j.val.toFixed(4) : j.val;
     }
-    // класс selected
     el.querySelectorAll('.joint-row').forEach(r => {
       r.classList.toggle('selected', r.dataset.key === selectedJoint);
     });
