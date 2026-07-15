@@ -681,6 +681,9 @@ try:
                                         threshold = m.get("threshold", 0)
                                         skey = f"ableton_{m['id']}"
                                         sval = smooth_val(skey, val, smoothing)
+                                        # invert
+                                        if m.get("invert", False):
+                                            sval = 1.0 - sval
                                         # scale/min/max
                                         scale = m.get("scale", 1.0)
                                         pmin = m.get("min", 0.0)

@@ -173,6 +173,7 @@ body {
         <input type="number" id="manual-param" placeholder="param#" value="1" style="width:56px;background:#18181b;border:1px solid #27272a;color:#d4d4d8;padding:3px 6px;border-radius:4px;font-size:11px">
         <input type="number" id="manual-min" placeholder="min" value="0" step="0.1" style="width:52px;background:#18181b;border:1px solid #27272a;color:#d4d4d8;padding:3px 6px;border-radius:4px;font-size:11px">
         <input type="number" id="manual-max" placeholder="max" value="1" step="0.1" style="width:52px;background:#18181b;border:1px solid #27272a;color:#d4d4d8;padding:3px 6px;border-radius:4px;font-size:11px">
+        <label style="display:flex;align-items:center;gap:3px;font-size:11px;color:#a1a1aa"><input type="checkbox" id="manual-invert"> invert</label>
         <button class="btn" onclick="addManualMapping()" style="font-size:11px;padding:3px 8px">Add</button>
       </div>
     </div>
@@ -449,7 +450,7 @@ function renderMappings() {
     const dst = (m.paramName ? `${m.deviceName} → ${m.paramName}` : `Track ${m.track} · Dev ${m.device} · #${m.param}`) + rangeTxt;
     html += `<div class="map-card">
       <button class="del" onclick="removeMapping(${m.id})">✕</button>
-      <div style="margin-right:18px"><span class="map-src">${m.joint}/${m.axis}</span></div>
+      <div style="margin-right:18px"><span class="map-src">${m.joint}/${m.axis}</span>${m.invert ? ' <span style="color:#eab308;font-size:10px">↕ inv</span>' : ''}</div>
       <div style="margin-right:18px"><span class="map-arrow">→</span> <span class="map-dst">${dst}</span></div>
     </div>`;
   }
@@ -489,6 +490,7 @@ async function addMapping() {
     param: selectedParamData.param,
     min: selectedParamData.min ?? 0,
     max: selectedParamData.max ?? 1,
+    invert: false,
     trackName: selectedParamData.trackName || `Track ${selectedParamData.track}`,
     deviceName: selectedParamData.deviceName || `Device ${selectedParamData.device}`,
     paramName: selectedParamData.name || `#${selectedParamData.param}`,
@@ -518,12 +520,13 @@ function addManualMapping() {
   const maxEl = document.getElementById('manual-max');
   const min = minEl.value === '' ? 0 : +minEl.value;
   const max = maxEl.value === '' ? 1 : +maxEl.value;
+  const invert = document.getElementById('manual-invert').checked;
   if (!selectedJoint) { alert('Select a joint first'); return; }
   const [joint, axis] = selectedJoint.split('/');
   const maxId = mappings.reduce((m, x) => Math.max(m, x.id || 0), 0);
   mappings.push({
     id: maxId + 1, joint, axis,
-    track, device, param, min, max,
+    track, device, param, min, max, invert,
     trackName: `Track ${track}`, deviceName: `Device ${device}`, paramName: `Param #${param}`,
   });
   renderMappings();
