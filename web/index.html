@@ -513,13 +513,13 @@ async function doSave() {
   try {
     await api('/mappings', { method: 'PUT', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(mappings) });
     btn.textContent = '✅ Saved';
+    await loadProfiles();
   } catch {
     btn.textContent = '❌ Error';
   }
   setTimeout(() => {
     btn.disabled = false;
     btn.textContent = 'Save';
-    loadProfiles();
   }, 1500);
 }
 
