@@ -148,7 +148,7 @@ def make_silhouette_mask(depth_mm):
 
 def draw_person_skeleton(frame, landmarks, color, joint_names=None, show_coords=False):
     h, w = frame.shape[:2]
-    pts = [(int(lm.x * w), int(lm.y * h)) for lm in landmarks]
+    pts = [(int((1.0 - lm.x) * w), int(lm.y * h)) for lm in landmarks]
     for a, b in POSE_CONNECTIONS:
         if a < len(pts) and b < len(pts):
             cv2.line(frame, pts[a], pts[b], color, 2)
