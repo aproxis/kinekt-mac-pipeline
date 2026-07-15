@@ -450,8 +450,14 @@ function renderMappings() {
     const dst = (m.paramName ? `${m.deviceName} → ${m.paramName}` : `Track ${m.track} · Dev ${m.device} · #${m.param}`) + rangeTxt;
     html += `<div class="map-card">
       <button class="del" onclick="removeMapping(${m.id})">✕</button>
-      <div style="margin-right:18px"><span class="map-src">${m.joint}/${m.axis}</span>${m.invert ? ' <span style="color:#eab308;font-size:10px">↕ inv</span>' : ''}</div>
-      <div style="margin-right:18px"><span class="map-arrow">→</span> <span class="map-dst">${dst}</span></div>
+      <div style="margin-right:18px"><span class="map-src">${m.joint}/${m.axis}</span></div>
+      <div style="margin-right:18px;display:flex;align-items:center;gap:6px">
+        <span class="map-arrow">→</span> <span class="map-dst">${dst}</span>
+        <label style="display:flex;align-items:center;gap:2px;font-size:10px;color:#71717a;cursor:pointer;margin-left:auto">
+          <input type="checkbox" ${m.invert ? 'checked' : ''} onchange="toggleInvert(${m.id}, this.checked)">
+          inv
+        </label>
+      </div>
     </div>`;
   }
   el.innerHTML = html;
@@ -510,6 +516,11 @@ async function removeMapping(id) {
   mappings = mappings.filter(m => m.id !== id);
   renderMappings();
   await doSave();
+}
+
+function toggleInvert(id, checked) {
+  const m = mappings.find(x => x.id === id);
+  if (m) { m.invert = checked; doSave(); }
 }
 
 function addManualMapping() {
