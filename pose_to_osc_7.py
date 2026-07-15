@@ -609,23 +609,22 @@ try:
             freenect.process_events(ctx)
             if latest_rgb is None or latest_depth is None:
                 continue
-            frame = cv2.flip(latest_rgb, 1)
-            depth_mm = cv2.flip(latest_depth, 1)
+            frame_bgr = latest_rgb
+            depth_mm_raw = cv2.flip(latest_depth, 1)
+            display_frame = cv2.flip(frame_bgr, 1)
             if USE_DEPTH_MASK:
-                mask = make_silhouette_mask(depth_mm)
-                display_frame = cv2.bitwise_and(frame, frame, mask=mask)
-            else:
-                display_frame = frame.copy()
+                mask = make_silhouette_mask(depth_mm_raw)
+                display_frame = cv2.bitwise_and(display_frame, display_frame, mask=mask)
+            depth_mm = depth_mm_raw
         else:
             ret, frame_bgr = webcam.read()
             if not ret:
                 print("Вебка потеряна")
                 break
-            frame = cv2.flip(frame_bgr, 1)
-            display_frame = frame.copy()
+            display_frame = cv2.flip(frame_bgr, 1)
             depth_mm = None
 
-        rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        rgb = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
         mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb)
         timestamp_ms = int((time.time() - start_time) * 1000)
 
