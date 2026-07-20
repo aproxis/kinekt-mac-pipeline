@@ -10,7 +10,7 @@ public class OutlineCompositor : MonoBehaviour
     [Range(0, 3)] public float fadePower = 1.5f;
 
     [Header("Drift")]
-    [Range(0, 0.1f)] public float driftAmount = 0.02f;
+    [Range(0, 0.2f)] public float driftAmount = 0.02f;
 
     [Header("Hue")]
     [Range(0, 1)] public float hueShift = 0.3f;
@@ -24,7 +24,6 @@ public class OutlineCompositor : MonoBehaviour
 
     private RingBuffer ringBuffer;
     private Material outlineMat;
-    private Material compositeMat;
     private RenderTexture compositeRT;
 
     void Start()
@@ -34,7 +33,6 @@ public class OutlineCompositor : MonoBehaviour
         ringBuffer.stride = captureStride;
 
         outlineMat = new Material(Shader.Find("Kinekt/OutlineComposite"));
-        compositeMat = new Material(Shader.Find("Hidden/Kinekt/Composite"));
     }
 
     void OnRenderImage(RenderTexture src, RenderTexture dest)
@@ -48,7 +46,6 @@ public class OutlineCompositor : MonoBehaviour
         int w = liveMaskTexture.width;
         int h = liveMaskTexture.height;
 
-        // create composite RT if needed
         if (compositeRT == null || compositeRT.width != w || compositeRT.height != h)
         {
             if (compositeRT != null) compositeRT.Release();
@@ -56,15 +53,12 @@ public class OutlineCompositor : MonoBehaviour
             compositeRT.Create();
         }
 
-        // clear to transparent
         RenderTexture.active = compositeRT;
         GL.Clear(false, true, Color.clear);
         RenderTexture.active = null;
 
-        // render live mask first (full alpha, no outline)
         Graphics.Blit(liveMaskTexture, compositeRT);
 
-        // render each snapshot outline on top
         var snapshots = ringBuffer.Snapshots;
         for (int i = 0; i < snapshots.Length; i++)
         {
@@ -89,7 +83,6 @@ public class OutlineCompositor : MonoBehaviour
     void OnDestroy()
     {
         if (outlineMat != null) Destroy(outlineMat);
-        if (compositeMat != null) Destroy(compositeMat);
         if (compositeRT != null) compositeRT.Release();
     }
 }
