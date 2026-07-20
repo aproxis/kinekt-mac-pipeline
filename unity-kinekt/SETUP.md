@@ -1,49 +1,56 @@
 # Unity Kinekt — Setup
 
-## Requirements
-- Unity 6000.5+ (уже установлен)
-- KlakSyphon (уже в проекте, `Assets/KlakSyphon/`)
-- Python `pose_to_osc_7.py` с включённым `SEND_MASK_SYPHON = True`
+## Quick Start
 
-## Структура проекта
+### 1. Open project in Unity Hub
+- Open Unity Hub → Open → выбери `unity-kinekt/`
+- Дождись импорта всех ассетов (1-2 минуты)
 
+### 2. Setup Main Camera
+В Hierarchy выбери **Main Camera**. Добавь компоненты (Add Component):
+
+| Компонент | Откуда |
+|-----------|--------|
+| **MaskCapture** | `Scripts/MaskCapture` |
+| **RingBuffer** | `Scripts/RingBuffer` |
+| **OutlineCompositor** | `Scripts/OutlineCompositor` |
+
+Настрой **MaskCapture**:
+- `serverName` = `KinectMask` (имя Syphon сервера из Python)
+- `compositor` → перетащи `OutlineCompositor` (тот же объект)
+
+### 3. Запусти Python (Терминал 2)
+```bash
+cd Kinekt360
+source venv/bin/activate
+python pose_to_osc_7.py
 ```
-unity-kinekt/
-├── Assets/
-│   ├── KlakSyphon/        ← Syphon receiver (Keijiro)
-│   ├── Scripts/
-│   │   ├── MaskCapture.cs  ← принимает маску из Syphon, кормит RingBuffer
-│   │   ├── RingBuffer.cs   ← кольцевой буфер N кадров
-│   │   └── OutlineCompositor.cs ← рендерит эффект через шейдер
-│   └── Shaders/
-│       └── OutlineComposite.shader ← контур + fade + drift + hue
-```
 
-## Setup Scene
+### 4. Play в Unity
+Нажми **Play**. Если всё ок:
+- Увидишь скелет + контурные копии
+- FPS в углу экрана
 
-### 1. Create GameObject `KinektManager`
-Add components:
+Если чёрный экран — проверь консоль Unity (Window → General → Console).
 
-| Component | Settings |
-|-----------|----------|
-| **MaskCapture** | Server Name: `KinectMask`, Capture Size: 512x512, Interval: 3 |
-| **RingBuffer** | Capacity: 24, Stride: 3 |
-| **OutlineCompositor** | Outline Color, Width, Fade, Drift — настрой под себя |
+## Параметры
 
-### 2. Camera
-На **Main Camera** добавь скрипт `OutlineCompositor` (уже есть на KinektManager).
-
-### 3. Play
-- Запусти `pose_to_osc_7.py` — увидишь эффект в Unity Game view
-
-## Параметры OutlineCompositor
-
+### OutlineCompositor
 | Параметр | По умолч | Что делает |
 |----------|----------|------------|
-| Outline Color | Cyan | Базовый цвет контура |
+| Outline Color | Cyan | Цвет контура |
 | Outline Width | 3 | Толщина в пикселях |
-| Fade Power | 1.5 | Скорость затухания старых кадров |
-| Drift Amount | 0.02 | На сколько старые слепки уезжают |
-| Hue Shift | 0.3 | Смена цвета от новых к старым |
+| Fade Power | 1.5 | Затухание старых кадров |
+| Drift Amount | 0.02 | Смещение старых слепков |
+| Hue Shift | 0.3 | Сдвиг цвета со временем |
 | Snapshot Capacity | 16 | Сколько кадров хранить |
-| Capture Stride | 3 | Каждый N-й кадр (экономия perf) |
+| Capture Stride | 3 | Каждый N-й кадр маски |
+
+## Если не работает
+
+| Симптом | Причина | Фикс |
+|---------|---------|------|
+| Чёрный экран | Скрипты не на камере | Добавь все 3 скрипта на Main Camera |
+| DllNotFoundException | Нет нативного плагина | Сделай git pull — .bundle уже добавлен |
+| "Waiting for Syphon" | Python не запущен | Запусти `pose_to_osc_7.py` |
+| Нет outline | Маска пустая | webcam не даёт depth — подключи Kinect |
