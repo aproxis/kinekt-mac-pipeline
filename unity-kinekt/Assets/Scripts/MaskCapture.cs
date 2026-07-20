@@ -7,6 +7,7 @@ public class MaskCapture : MonoBehaviour
     public string serverName = "KinectMask";
     public Vector2Int captureSize = new Vector2Int(512, 512);
     public int captureInterval = 3;
+    public OutlineCompositor compositor;
 
     private RingBuffer ring;
     private SyphonClient client;
@@ -21,6 +22,9 @@ public class MaskCapture : MonoBehaviour
 
         downscaled = new RenderTexture(captureSize.x, captureSize.y, 0, RenderTextureFormat.R8);
         downscaled.Create();
+
+        if (compositor != null)
+            compositor.liveMaskTexture = downscaled;
     }
 
     void Update()
