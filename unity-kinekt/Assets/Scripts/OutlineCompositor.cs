@@ -5,6 +5,8 @@ public class OutlineCompositor : MonoBehaviour
 {
     [Header("Outline")]
     public Color outlineColor = Color.cyan;
+    public Color trailColorNew = Color.cyan;
+    public Color trailColorOld = Color.magenta;
     [Range(1, 10)] public float outlineWidth = 3;
 
     [Header("Alpha")]
@@ -17,8 +19,8 @@ public class OutlineCompositor : MonoBehaviour
     public Vector2 driftDirection = new Vector2(1, -0.3f);
     [Range(-0.5f, 0.5f)] public float scaleAmount;
 
-    [Header("Hue")]
-    [Range(0, 1)] public float hueShift = 0.3f;
+    [Header("Hue (on top of trail color gradient)")]
+    [Range(0, 1)] public float hueShift;
 
     [Header("Performance")]
     public int snapshotCapacity = 16;
@@ -80,7 +82,7 @@ public class OutlineCompositor : MonoBehaviour
             float age = 1.0f - (float)i / Mathf.Max(count - 1, 1);
 
             outlineMat.SetTexture("_MainTex", snapshots[i]);
-            outlineMat.SetColor("_OutlineColor", outlineColor);
+            outlineMat.SetColor("_OutlineColor", Color.Lerp(trailColorNew, trailColorOld, age));
             outlineMat.SetFloat("_OutlineWidth", outlineWidth);
             outlineMat.SetFloat("_FadePower", fadePower);
             outlineMat.SetFloat("_DriftAmount", driftAmount);
