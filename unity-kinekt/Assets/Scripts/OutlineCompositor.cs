@@ -1,7 +1,6 @@
 using UnityEngine;
 
 [RequireComponent(typeof(RingBuffer))]
-[RequireComponent(typeof(Camera))]
 public class OutlineCompositor : MonoBehaviour
 {
     [Header("Outline")]
@@ -35,13 +34,9 @@ public class OutlineCompositor : MonoBehaviour
         outlineMat = new Material(Shader.Find("Kinekt/OutlineComposite"));
     }
 
-    void OnRenderImage(RenderTexture src, RenderTexture dest)
+    void Update()
     {
-        if (liveMaskTexture == null)
-        {
-            Graphics.Blit(src, dest);
-            return;
-        }
+        if (liveMaskTexture == null) return;
 
         int w = liveMaskTexture.width;
         int h = liveMaskTexture.height;
@@ -76,8 +71,12 @@ public class OutlineCompositor : MonoBehaviour
 
             Graphics.Blit(snapshots[i], compositeRT, outlineMat);
         }
+    }
 
-        Graphics.Blit(compositeRT, dest);
+    void OnGUI()
+    {
+        if (compositeRT != null)
+            Graphics.DrawTexture(new Rect(0, 0, Screen.width, Screen.height), compositeRT);
     }
 
     void OnDestroy()
