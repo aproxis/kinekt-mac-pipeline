@@ -794,8 +794,7 @@ def mouse_callback(event, x, y, flags, param):
 
 
 cv2.setMouseCallback("Kinekt360 — [TAB] Panel  [Q] Quit", mouse_callback)
-# depth preview controlled via runtime panel
-if has_depth and runtime["show_depth"]:
+if has_depth:
     cv2.namedWindow("Depth / IR")
     cv2.moveWindow("Depth / IR", 720, 50)
 
@@ -978,7 +977,7 @@ try:
 
         if SHOW_PREVIEW:
             cv2.imshow("Kinekt360 — [TAB] Panel  [Q] Quit", display_frame)
-        if runtime["show_depth"] and runtime.get("use_depth_mask") and depth_mm is not None:
+        if depth_mm is not None:
             cv2.imshow("Depth / IR", depth_to_display(depth_mm))
 
         # publish all enabled Syphon streams
