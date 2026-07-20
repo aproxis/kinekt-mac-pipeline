@@ -49,6 +49,8 @@ MONITOR_OSC_PORT = 9001
 SEND_TO_MONITOR = True
 SEND_SYPHON = True
 SYPHON_NAME = "KinectSkeleton"
+SEND_MASK_SYPHON = True
+MASK_SYPHON_NAME = "KinectMask"
 MODEL_PATH = "pose_landmarker.task"
 SHOW_PREVIEW = True
 SHOW_DEPTH_PREVIEW = True
@@ -587,12 +589,17 @@ if SMOOTHING_ALPHA > 0:
 
 syphon_server = None
 syphon_texture = None
+mask_syphon_server = None
+mask_syphon_texture = None
 if SEND_SYPHON:
     if not SYPHON_AVAILABLE:
         print("syphon-python не установлен -- Syphon-вывод отключён")
     else:
         syphon_server = syphon.SyphonMetalServer(SYPHON_NAME)
         print(f"Syphon-сервер: '{SYPHON_NAME}'")
+        if SEND_MASK_SYPHON:
+            mask_syphon_server = syphon.SyphonMetalServer(MASK_SYPHON_NAME)
+            print(f"Mask Syphon-сервер: '{MASK_SYPHON_NAME}'")
 
 start_time = time.time()
 frame_counter = 0
@@ -760,6 +767,19 @@ try:
             copy_image_to_mtl_texture(rgba, syphon_texture)
             syphon_server.publish_frame_texture(syphon_texture)
 
+        if mask_syphon_server is not None:
+            h, w = display_frame.shape[:2]
+            if mask_syphon_texture is None:
+                mask_syphon_texture = create_mtl_texture(mask_syphon_server.device, w, h)
+            if depth_mm is not None and USE_DEPTH_MASK:
+                mask = make_silhouette_mask(depth_mm)
+                mask_rgb = cv2.cvtColor(mask, cv2.COLOR_GRAY2BGR)
+            else:
+                mask_rgb = np.zeros((h, w, 3), dtype=np.uint8)
+            rgba_mask = cv2.cvtColor(mask_rgb, cv2.COLOR_BGR2RGBA)
+            copy_image_to_mtl_texture(rgba_mask, mask_syphon_texture)
+            mask_syphon_server.publish_frame_texture(mask_syphon_texture)
+
         key = cv2.waitKey(1) & 0xFF
         if key == ord("q"):
             break
@@ -776,6 +796,8 @@ finally:
     cv2.destroyAllWindows()
     if syphon_server is not None:
         syphon_server.stop()
+    if mask_syphon_server is not None:
+        mask_syphon_server.stop()
     if camera_mode == "kinect":
         if dev:
             freenect.stop_video(dev)
