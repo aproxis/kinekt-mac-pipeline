@@ -6,6 +6,8 @@ public class MaskCapture : MonoBehaviour
 {
     public string serverName = "KinectMask";
     public Vector2Int captureSize = new Vector2Int(512, 512);
+
+    [Tooltip("Единственный параметр частоты захвата в трейл: раз в N кадров (1 = каждый кадр)")]
     public int captureInterval = 3;
     public OutlineCompositor compositor;
     public bool flipHorizontal;

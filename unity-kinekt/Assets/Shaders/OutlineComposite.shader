@@ -4,17 +4,16 @@ Shader "Kinekt/OutlineComposite"
     {
         _MainTex ("Mask", 2D) = "white" {}
         _OutlineColor ("Outline Color", Color) = (0, 1, 1, 1)
-        _OutlineWidth ("Outline Width", float) = 3
-        _FadePower ("Fade Power", float) = 1.5
-        _DriftAmount ("Drift Amount", float) = 0.02
-        _DriftDirection ("Drift Direction", Vector) = (1, -0.3, 0, 0)
-        _ScaleAmount ("Scale Amount", float) = 0
-        _HueShift ("Hue Shift", float) = 0.3
-        _Age ("Age", float) = 0
-        _SnapshotAlpha ("Snapshot Alpha", float) = 1
-        _LiveAlpha ("Live Alpha", float) = 1
-        _TrailAlpha ("Trail Alpha", float) = 1
-        _LiveIsOutline ("Live Is Outline", float) = 0
+        _OutlineWidth ("Outline Width", Float) = 3
+        _FadePower ("Fade Power", Float) = 1.5
+        _HueShift ("Hue Shift", Float) = 0.3
+        _Age ("Age", Float) = 0
+        _UVOffset ("UV Offset", Vector) = (0, 0, 0, 0)
+        _UVScale ("UV Scale", Vector) = (1, 1, 0, 0)
+        _Mirror ("Mirror", Float) = 0
+        _TrailAlpha ("Trail Alpha", Float) = 1
+        _LiveAlpha ("Live Alpha", Float) = 1
+        _LiveIsOutline ("Live Is Outline", Float) = 0
     }
 
     SubShader
@@ -24,7 +23,7 @@ Shader "Kinekt/OutlineComposite"
         ZWrite Off
         Cull Off
 
-        // ---- Pass 0: живой силуэт / контур ----
+        // ---- Pass 0: живой кадр — сплошная заливка или контур (переключает _LiveIsOutline) ----
         Pass
         {
             CGPROGRAM
@@ -32,17 +31,8 @@ Shader "Kinekt/OutlineComposite"
             #pragma fragment frag
             #include "UnityCG.cginc"
 
-            struct appdata
-            {
-                float4 vertex : POSITION;
-                float2 uv : TEXCOORD0;
-            };
-
-            struct v2f
-            {
-                float2 uv : TEXCOORD0;
-                float4 vertex : SV_POSITION;
-            };
+            struct appdata { float4 vertex : POSITION; float2 uv : TEXCOORD0; };
+            struct v2f { float2 uv : TEXCOORD0; float4 vertex : SV_POSITION; };
 
             sampler2D _MainTex;
             float4 _MainTex_TexelSize;
@@ -63,26 +53,27 @@ Shader "Kinekt/OutlineComposite"
             {
                 float mask = tex2D(_MainTex, i.uv).r;
 
-                if (_LiveIsOutline > 0.5)
-                {
-                    float w = _OutlineWidth * _MainTex_TexelSize.x;
-                    float n = tex2D(_MainTex, i.uv + float2(-w, 0)).r;
-                    float e = tex2D(_MainTex, i.uv + float2(w, 0)).r;
-                    float s = tex2D(_MainTex, i.uv + float2(0, -w)).r;
-                    float n2 = tex2D(_MainTex, i.uv + float2(0, w)).r;
-                    float avg = (n + e + s + n2) * 0.25;
-                    float isEdge = (avg > 0.05 && mask < 0.05) ? _LiveAlpha : 0;
-                    return fixed4(_OutlineColor.rgb, isEdge);
-                }
-                else
+                if (_LiveIsOutline < 0.5)
                 {
                     return fixed4(1, 1, 1, mask * _LiveAlpha);
                 }
+
+                float w = _OutlineWidth * _MainTex_TexelSize.x;
+                float n  = tex2D(_MainTex, i.uv + float2(-w, 0)).r;
+                float e  = tex2D(_MainTex, i.uv + float2( w, 0)).r;
+                float s  = tex2D(_MainTex, i.uv + float2(0, -w)).r;
+                float n2 = tex2D(_MainTex, i.uv + float2(0,  w)).r;
+                float avg = (n + e + s + n2) * 0.25;
+                float isEdge = (avg > 0.05 && mask < 0.05) ? 1.0 : 0.0;
+
+                return fixed4(_OutlineColor.rgb, isEdge * _LiveAlpha);
             }
             ENDCG
         }
 
-        // ---- Pass 1: контур трейлов (снапшоты) ----
+        // ---- Pass 1: трейл. Геометрию (offset/scale/mirror) полностью считает C#
+        // (OutlineCompositor + опционально TrailCarousel) — здесь только применяем её
+        // и рисуем контур. Так добавлять новые "пост-обработки" можно без правки шейдера. ----
         Pass
         {
             CGPROGRAM
@@ -90,29 +81,19 @@ Shader "Kinekt/OutlineComposite"
             #pragma fragment frag
             #include "UnityCG.cginc"
 
-            struct appdata
-            {
-                float4 vertex : POSITION;
-                float2 uv : TEXCOORD0;
-            };
-
-            struct v2f
-            {
-                float2 uv : TEXCOORD0;
-                float4 vertex : SV_POSITION;
-            };
+            struct appdata { float4 vertex : POSITION; float2 uv : TEXCOORD0; };
+            struct v2f { float2 uv : TEXCOORD0; float4 vertex : SV_POSITION; };
 
             sampler2D _MainTex;
             float4 _MainTex_TexelSize;
-            float4 _OutlineColor;
+            fixed4 _OutlineColor;
             float _OutlineWidth;
             float _FadePower;
-            float _DriftAmount;
-            float2 _DriftDirection;
-            float _ScaleAmount;
             float _HueShift;
             float _Age;
-            float _SnapshotAlpha;
+            float4 _UVOffset;
+            float4 _UVScale;
+            float _Mirror;
             float _TrailAlpha;
 
             v2f vert (appdata v)
@@ -125,34 +106,32 @@ Shader "Kinekt/OutlineComposite"
 
             fixed4 frag (v2f i) : SV_Target
             {
-                // drift
-                float2 uv = i.uv + _DriftAmount * _Age * _DriftDirection;
-
-                // scale around center
-                float2 center = float2(0.5, 0.5);
-                uv = (uv - center) * (1 + _ScaleAmount * _Age) + center;
+                float2 centered = i.uv - 0.5;
+                centered.x *= (_Mirror > 0.5) ? -1.0 : 1.0;
+                centered *= _UVScale.xy;
+                float2 uv = centered + 0.5 + _UVOffset.xy;
 
                 float mask = tex2D(_MainTex, uv).r;
 
-                // outline: 4-neighbor edge
                 float w = _OutlineWidth * _MainTex_TexelSize.x;
-                float n = tex2D(_MainTex, uv + float2(-w, 0)).r;
-                float e = tex2D(_MainTex, uv + float2(w, 0)).r;
-                float s = tex2D(_MainTex, uv + float2(0, -w)).r;
-                float n2 = tex2D(_MainTex, uv + float2(0, w)).r;
+                float n  = tex2D(_MainTex, uv + float2(-w, 0)).r;
+                float e  = tex2D(_MainTex, uv + float2( w, 0)).r;
+                float s  = tex2D(_MainTex, uv + float2(0, -w)).r;
+                float n2 = tex2D(_MainTex, uv + float2(0,  w)).r;
                 float avg = (n + e + s + n2) * 0.25;
-
                 float isEdge = (avg > 0.05 && mask < 0.05) ? 1.0 : 0.0;
 
-                // age=0 = newest (brightest), age=1 = oldest (most faded)
-                float alpha = pow(1.0 - _Age, _FadePower) * _SnapshotAlpha * _TrailAlpha;
+                float ageC = saturate(_Age);
+                float alpha = pow(1.0 - ageC, _FadePower) * _TrailAlpha;
 
-                // hue shift over age
                 float3 col = _OutlineColor.rgb;
-                float3 alt = _OutlineColor.rgb + _HueShift * _Age * float3(0.5, -0.3, 0.8);
-                col = lerp(col, alt, _Age);
+                float3 alt = _OutlineColor.rgb + _HueShift * ageC * float3(0.5, -0.3, 0.8);
+                col = lerp(col, alt, ageC);
 
-                return fixed4(col, isEdge * alpha);
+                // за пределами кадра после смещения/скейла — не рисуем, иначе будут повторы по краям
+                float inBounds = (uv.x >= 0 && uv.x <= 1 && uv.y >= 0 && uv.y <= 1) ? 1.0 : 0.0;
+
+                return fixed4(col, isEdge * alpha * inBounds);
             }
             ENDCG
         }
