@@ -18,7 +18,7 @@ public class MaskCapture : MonoBehaviour
     {
         ring = GetComponent<RingBuffer>();
         client = gameObject.AddComponent<SyphonClient>();
-        client.ServerName = serverName;
+        client.ServerName = serverName.StartsWith("/") ? serverName : "/" + serverName;
 
         downscaled = new RenderTexture(captureSize.x, captureSize.y, 0, RenderTextureFormat.R8);
         downscaled.Create();
