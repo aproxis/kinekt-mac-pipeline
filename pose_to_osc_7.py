@@ -148,6 +148,27 @@ def make_silhouette_mask(depth_mm):
     return mask
 
 
+def make_pose_mask(h, w, pose_results):
+    mask = np.zeros((h, w), dtype=np.uint8)
+    if not pose_results or not pose_results.pose_landmarks:
+        return mask
+    for landmarks in pose_results.pose_landmarks:
+        pts = []
+        for lm in landmarks:
+            x = int((1.0 - lm.x) * w)
+            y = int(lm.y * h)
+            pts.append((x, y))
+        body = np.array(pts, dtype=np.int32)
+        cv2.fillPoly(mask, [body], 255)
+        # draw skeleton lines thicker
+        for a, b in POSE_CONNECTIONS:
+            if a < len(pts) and b < len(pts):
+                cv2.line(mask, pts[a], pts[b], 255, 6)
+    kernel = np.ones((5, 5), np.uint8)
+    mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel)
+    return mask
+
+
 def draw_person_skeleton(frame, landmarks, color, joint_names=None, show_coords=False):
     h, w = frame.shape[:2]
     pts = [(int((1.0 - lm.x) * w), int(lm.y * h)) for lm in landmarks]
@@ -773,9 +794,11 @@ try:
                 mask_syphon_texture = create_mtl_texture(mask_syphon_server.device, w, h)
             if depth_mm is not None and USE_DEPTH_MASK:
                 mask = make_silhouette_mask(depth_mm)
-                mask_rgb = cv2.cvtColor(mask, cv2.COLOR_GRAY2BGR)
+            elif result.pose_landmarks:
+                mask = make_pose_mask(h, w, result)
             else:
-                mask_rgb = np.zeros((h, w, 3), dtype=np.uint8)
+                mask = np.zeros((h, w), dtype=np.uint8)
+            mask_rgb = cv2.cvtColor(mask, cv2.COLOR_GRAY2BGR)
             rgba_mask = cv2.cvtColor(mask_rgb, cv2.COLOR_BGR2RGBA)
             copy_image_to_mtl_texture(rgba_mask, mask_syphon_texture)
             mask_syphon_server.publish_frame_texture(mask_syphon_texture)
