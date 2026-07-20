@@ -6,10 +6,16 @@ public class OutlineCompositor : MonoBehaviour
     [Header("Outline")]
     public Color outlineColor = Color.cyan;
     [Range(1, 10)] public float outlineWidth = 3;
+
+    [Header("Alpha")]
+    [Range(0, 1)] public float liveAlpha = 1;
+    [Range(0, 1)] public float trailAlpha = 1;
     [Range(0, 3)] public float fadePower = 1.5f;
 
-    [Header("Drift")]
+    [Header("Dynamics")]
     [Range(0, 0.2f)] public float driftAmount = 0.02f;
+    public Vector2 driftDirection = new Vector2(1, -0.3f);
+    [Range(-0.5f, 0.5f)] public float scaleAmount;
 
     [Header("Hue")]
     [Range(0, 1)] public float hueShift = 0.3f;
@@ -17,6 +23,9 @@ public class OutlineCompositor : MonoBehaviour
     [Header("Performance")]
     public int snapshotCapacity = 16;
     public int captureStride = 3;
+
+    [Header("Live")]
+    public bool liveFill = true;
 
     [Header("Live Feed")]
     public RenderTexture liveMaskTexture;
@@ -52,22 +61,35 @@ public class OutlineCompositor : MonoBehaviour
         GL.Clear(false, true, Color.clear);
         RenderTexture.active = null;
 
+        // pass 0: live silhouette/outline
+        outlineMat.SetFloat("_LiveAlpha", liveAlpha);
+        outlineMat.SetFloat("_LiveIsOutline", liveFill ? 0 : 1);
+        outlineMat.SetFloat("_OutlineWidth", outlineWidth);
+        outlineMat.SetColor("_OutlineColor", outlineColor);
         Graphics.Blit(liveMaskTexture, compositeRT, outlineMat, 0);
 
+        // pass 1: trail outlines
         var snapshots = ringBuffer.Snapshots;
-        for (int i = 0; i < snapshots.Length; i++)
+        int count = snapshots.Length;
+        for (int i = 0; i < count; i++)
         {
             if (snapshots[i] == null) continue;
 
-            float age = (float)i / Mathf.Max(snapshots.Length - 1, 1);
+            // i=0 = oldest, i=count-1 = newest
+            // age=0 = newest (bright), age=1 = oldest (faded)
+            float age = 1.0f - (float)i / Mathf.Max(count - 1, 1);
+
             outlineMat.SetTexture("_MainTex", snapshots[i]);
             outlineMat.SetColor("_OutlineColor", outlineColor);
             outlineMat.SetFloat("_OutlineWidth", outlineWidth);
             outlineMat.SetFloat("_FadePower", fadePower);
             outlineMat.SetFloat("_DriftAmount", driftAmount);
+            outlineMat.SetVector("_DriftDirection", driftDirection);
+            outlineMat.SetFloat("_ScaleAmount", scaleAmount);
             outlineMat.SetFloat("_HueShift", hueShift);
             outlineMat.SetFloat("_Age", age);
-            outlineMat.SetFloat("_SnapshotAlpha", 1.0f);
+            outlineMat.SetFloat("_SnapshotAlpha", liveFill ? 1 : 0);
+            outlineMat.SetFloat("_TrailAlpha", trailAlpha);
 
             Graphics.Blit(snapshots[i], compositeRT, outlineMat, 1);
         }

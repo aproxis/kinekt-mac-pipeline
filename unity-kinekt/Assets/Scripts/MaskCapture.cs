@@ -8,6 +8,8 @@ public class MaskCapture : MonoBehaviour
     public Vector2Int captureSize = new Vector2Int(512, 512);
     public int captureInterval = 3;
     public OutlineCompositor compositor;
+    public bool flipHorizontal;
+    public bool flipVertical;
 
     private RingBuffer ring;
     private SyphonClient client;
@@ -35,7 +37,15 @@ public class MaskCapture : MonoBehaviour
         var source = client.Texture;
         if (source == null) return;
 
-        Graphics.Blit(source, downscaled);
+        // flip via blit scale/offset
+        float sx = flipHorizontal ? -1 : 1;
+        float sy = flipVertical ? -1 : 1;
+        float ox = flipHorizontal ? 1 : 0;
+        float oy = flipVertical ? 1 : 0;
+        var scale = new Vector2(sx, sy);
+        var offset = new Vector2(ox, oy);
+        Graphics.Blit(source, downscaled, scale, offset);
+
         ring.Push(downscaled);
     }
 
