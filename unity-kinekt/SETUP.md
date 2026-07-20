@@ -1,54 +1,49 @@
 # Unity Kinekt — Setup
 
 ## Requirements
-- Unity 2022.3 LTS or newer (URP template)
-- [KinoSyphon](https://github.com/keijiro/KinoSyphon) — free Syphon receiver for Unity
+- Unity 6000.5+ (уже установлен)
+- KlakSyphon (уже в проекте, `Assets/KlakSyphon/`)
+- Python `pose_to_osc_7.py` с включённым `SEND_MASK_SYPHON = True`
 
-## Steps
+## Структура проекта
 
-### 1. Create Unity Project
-- Open Unity Hub → New Project → **Universal 3D (URP)**
-- Name: `KinektViewer`
+```
+unity-kinekt/
+├── Assets/
+│   ├── KlakSyphon/        ← Syphon receiver (Keijiro)
+│   ├── Scripts/
+│   │   ├── MaskCapture.cs  ← принимает маску из Syphon, кормит RingBuffer
+│   │   ├── RingBuffer.cs   ← кольцевой буфер N кадров
+│   │   └── OutlineCompositor.cs ← рендерит эффект через шейдер
+│   └── Shaders/
+│       └── OutlineComposite.shader ← контур + fade + drift + hue
+```
 
-### 2. Import Syphon
-- `Window → Package Manager → + → Add package from git URL`
-- Paste: `https://github.com/keijiro/KinoSyphon.git`
-- После установки появится `KinoSyphon` в Packages
+## Setup Scene
 
-### 3. Import Scripts
-- Copy папки `Assets/Scripts/` и `Assets/Shaders/` в проект
-- Перезагрузи Unity
-
-### 4. Setup Scene
-
-Create empty GameObject → `KinektManager`:
+### 1. Create GameObject `KinektManager`
+Add components:
 
 | Component | Settings |
 |-----------|----------|
-| **SyphonReceiver** | Server Name: `KinectMask` |
-| **RingBuffer** | Capacity: 16, Stride: 3 |
-| **OutlineCompositor** | Outline Color, Width, Drift — на вкус |
+| **MaskCapture** | Server Name: `KinectMask`, Capture Size: 512x512, Interval: 3 |
+| **RingBuffer** | Capacity: 24, Stride: 3 |
+| **OutlineCompositor** | Outline Color, Width, Fade, Drift — настрой под себя |
 
-На **Main Camera** добавь `KinektManager` → перетащи `Main Camera` в Inspector.
+### 2. Camera
+На **Main Camera** добавь скрипт `OutlineCompositor` (уже есть на KinektManager).
 
-### 5. Wire Syphon
-- SyphonReceiver нужно привязать к текстуре из Syphon
-- В `KinoSyphon` есть `SyphonReceiver.cs` — добавь его на `KinektManager`
-- В его поле `targetTexture` укажи `liveMaskTexture` из OutlineCompositor
+### 3. Play
+- Запусти `pose_to_osc_7.py` — увидишь эффект в Unity Game view
 
-### 6. Run
-- Запусти `pose_to_osc_7.py` (с Kinect или webcam)
-- В Unity нажми Play
-- Должен появиться эффект: живая маска + контурные слепки с затуханием
+## Параметры OutlineCompositor
 
-## Параметры настройки
-
-| Параметр | Что делает |
-|----------|------------|
-| `snapshotCapacity` | Сколько прошлых кадров хранить (16 = ~5 сек) |
-| `captureStride` | Каждый N-й кадр (3 = ~10 fps захват) |
-| `outlineWidth` | Толщина контура в пикселях |
-| `fadePower` | Скорость затухания старых слепков |
-| `driftAmount` | На сколько старые слепки уезжают вбок |
-| `hueShift` | Смена цвета от новых к старым |
-| `outlineColor` | Базовый цвет контура |
+| Параметр | По умолч | Что делает |
+|----------|----------|------------|
+| Outline Color | Cyan | Базовый цвет контура |
+| Outline Width | 3 | Толщина в пикселях |
+| Fade Power | 1.5 | Скорость затухания старых кадров |
+| Drift Amount | 0.02 | На сколько старые слепки уезжают |
+| Hue Shift | 0.3 | Смена цвета от новых к старым |
+| Snapshot Capacity | 16 | Сколько кадров хранить |
+| Capture Stride | 3 | Каждый N-й кадр (экономия perf) |
