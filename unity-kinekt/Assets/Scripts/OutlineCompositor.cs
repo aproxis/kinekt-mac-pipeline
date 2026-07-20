@@ -52,7 +52,7 @@ public class OutlineCompositor : MonoBehaviour
         GL.Clear(false, true, Color.clear);
         RenderTexture.active = null;
 
-        Graphics.Blit(liveMaskTexture, compositeRT);
+        Graphics.Blit(liveMaskTexture, compositeRT, outlineMat, 0);
 
         var snapshots = ringBuffer.Snapshots;
         for (int i = 0; i < snapshots.Length; i++)
@@ -69,7 +69,7 @@ public class OutlineCompositor : MonoBehaviour
             outlineMat.SetFloat("_Age", age);
             outlineMat.SetFloat("_SnapshotAlpha", 1.0f);
 
-            Graphics.Blit(snapshots[i], compositeRT, outlineMat);
+            Graphics.Blit(snapshots[i], compositeRT, outlineMat, 1);
         }
     }
 

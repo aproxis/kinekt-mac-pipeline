@@ -19,6 +19,50 @@ Shader "Kinekt/OutlineComposite"
         ZWrite Off
         Cull Off
 
+        // ---- Pass 0: живой силуэт ----
+        // Явно читаем .r и явно пишем альфу — не полагаемся на то,
+        // как конкретный GPU-бэкенд реплицирует одноканальный R8 в RGBA
+        // при обычном Graphics.Blit без материала.
+        Pass
+        {
+            CGPROGRAM
+            #pragma vertex vert
+            #pragma fragment frag
+            #include "UnityCG.cginc"
+
+            struct appdata
+            {
+                float4 vertex : POSITION;
+                float2 uv : TEXCOORD0;
+            };
+
+            struct v2f
+            {
+                float2 uv : TEXCOORD0;
+                float4 vertex : SV_POSITION;
+            };
+
+            sampler2D _MainTex;
+            fixed4 _OutlineColor;
+
+            v2f vert (appdata v)
+            {
+                v2f o;
+                o.vertex = UnityObjectToClipPos(v.vertex);
+                o.uv = v.uv;
+                return o;
+            }
+
+            fixed4 frag (v2f i) : SV_Target
+            {
+                float mask = tex2D(_MainTex, i.uv).r;
+                // сплошной белый силуэт, альфа = значение маски
+                return fixed4(1, 1, 1, mask);
+            }
+            ENDCG
+        }
+
+        // ---- Pass 1: контур снапшотов (как раньше) ----
         Pass
         {
             CGPROGRAM
@@ -71,7 +115,7 @@ Shader "Kinekt/OutlineComposite"
                 float n2 = tex2D(_MainTex, uv + float2(0, w)).r;
                 float avg = (n + e + s + n2) * 0.25;
 
-                float isEdge = avg > 0.05 && mask < 0.05;
+                float isEdge = (avg > 0.05 && mask < 0.05) ? 1.0 : 0.0;
 
                 // alpha fade: old = transparent
                 float alpha = pow(1.0 - _Age, _FadePower) * _SnapshotAlpha;
