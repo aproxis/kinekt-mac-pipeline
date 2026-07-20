@@ -88,7 +88,7 @@ public class OutlineCompositor : MonoBehaviour
             outlineMat.SetFloat("_ScaleAmount", scaleAmount);
             outlineMat.SetFloat("_HueShift", hueShift);
             outlineMat.SetFloat("_Age", age);
-            outlineMat.SetFloat("_SnapshotAlpha", liveFill ? 1 : 0);
+            outlineMat.SetFloat("_SnapshotAlpha", 1);
             outlineMat.SetFloat("_TrailAlpha", trailAlpha);
 
             Graphics.Blit(snapshots[i], compositeRT, outlineMat, 1);
