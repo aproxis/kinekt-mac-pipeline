@@ -109,16 +109,6 @@ def draw_control_panel(frame, rt, h, w):
             key = f"stream_{sid}"
             y = _toggle(frame, sinfo["label"], rt, key, px + 12, y, pw - 24, 20)
             y += 2
-        y += 4
-        y = _sep(frame, px + 8, y, pw - 16)
-        y = _btn(frame, "Preview:", None, px + 8, y, 65, 18)
-        y += 2
-        for sid, sinfo in SYPHON_STREAMS.items():
-            key = f"preview_{sid}"
-            val = rt.get("preview_tab_stream", "") == sid
-            bg = (50, 70, 90) if val else (35, 35, 45)
-            xp = px + 12 + (65 + 4) * ["skeleton", "rgb", "depth", "ir", "mask"].index(sid) if sid in ["skeleton", "rgb", "depth", "ir", "mask"] else px + 12
-            # simpler: just show next/prev via arrows
         y = _sep(frame, px + 8, y, pw - 16)
         y = _btn(frame, "Preview tab:", None, px + 8, y, 90, 18)
         y += 2
@@ -136,8 +126,11 @@ def draw_control_panel(frame, rt, h, w):
     elif tab == 1:
         y = y0
         y = _btn(frame, "Camera", None, px + 8, y, 60, 18)
-        y = _toggle(frame, "Kinect", rt, "cam_kinect", px + 70, y - 18, 60, 18)
-        y = _toggle(frame, "Webcam", rt, "cam_webcam", px + 135, y - 18, 60, 18)
+        cam_row_y = y - 22  # та же строка, что и лейбл "Camera"
+        rt["cam_kinect"] = (camera_mode == "kinect")
+        rt["cam_webcam"] = (camera_mode == "webcam")
+        _toggle(frame, "Kinect", rt, "cam_kinect", px + 70, cam_row_y, 60, 18)
+        _toggle(frame, "Webcam", rt, "cam_webcam", px + 135, cam_row_y, 60, 18)
         y = _sep(frame, px + 8, y, pw - 16)
         y = _btn(frame, "Track:", None, px + 8, y, 55, 18)
         y = _slider(frame, rt, "num_poses", px + 65, y - 18, 100, 18, 1, 4, 1)
@@ -210,11 +203,16 @@ def handle_click(rt, key, x, y):
         if vname.startswith("stream_"):
             rt[vname] = not rt.get(vname, False)
             return True
+        if vname in ("cam_kinect", "cam_webcam"):
+            print("Переключение камеры на лету не поддерживается — перезапусти скрипт с другим источником.")
+            return True
         if vname in ("send_osc", "send_osc_flat", "send_gestures", "show_coords"):
             rt[vname] = not rt.get(vname, False)
             return True
         if vname == "num_poses":
             rt["num_poses"] = rt.get("num_poses", 2) % 4 + 1
+            print(f"Track: {rt['num_poses']} — применится только при перезапуске скрипта "
+                  f"(PoseLandmarker создаётся один раз при старте)")
             return True
         if vname == "tilt":
             rt["tilt"] = (rt.get("tilt", 0) + 5) % 65 - 30
@@ -968,40 +966,28 @@ try:
 
         h, w = display_frame.shape[:2]
 
-        if SHOW_PREVIEW:
-            draw_control_panel(display_frame, runtime, h, w)
-            cv2.putText(display_frame, f"FPS: {current_fps}", (10, 30),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2, cv2.LINE_AA)
-            cv2.putText(display_frame, f"People: {people_present}", (10, 55),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2, cv2.LINE_AA)
+        # ---- вычисляем каждый вариант картинки лениво и один раз за кадр ----
+        stream_cache = {}
 
-        if SHOW_PREVIEW:
-            cv2.imshow("Kinekt360 — [TAB] Panel  [Q] Quit", display_frame)
-        if depth_mm is not None:
-            cv2.imshow("Depth / IR", depth_to_display(depth_mm))
-
-        # publish all enabled Syphon streams
-        h, w = display_frame.shape[:2]
-        for sid, sv in syphon_servers.items():
-            if not runtime.get(f"stream_{sid}", False):
-                continue
+        def get_stream_frame(sid):
+            if sid in stream_cache:
+                return stream_cache[sid]
             if sid == "skeleton":
-                frame_data = display_frame
+                out = display_frame
             elif sid == "rgb":
-                frame_data = cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR)
+                out = cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR)
             elif sid == "depth":
                 if depth_mm is not None:
-                    d_disp = depth_to_display(depth_mm)
-                    frame_data = cv2.resize(d_disp, (w, h))
+                    out = cv2.resize(depth_to_display(depth_mm), (w, h))
                 else:
-                    frame_data = np.zeros((h, w, 3), dtype=np.uint8)
+                    out = np.zeros((h, w, 3), dtype=np.uint8)
             elif sid == "ir":
-                # IR: use depth as grayscale stand-in when no separate IR stream
+                # IR: используем depth как grayscale-заглушку, отдельного IR-потока нет
                 if depth_mm is not None:
                     ir = np.clip(depth_mm / 16, 0, 255).astype(np.uint8)
-                    frame_data = cv2.cvtColor(ir, cv2.COLOR_GRAY2BGR)
+                    out = cv2.cvtColor(ir, cv2.COLOR_GRAY2BGR)
                 else:
-                    frame_data = np.zeros((h, w, 3), dtype=np.uint8)
+                    out = np.zeros((h, w, 3), dtype=np.uint8)
             elif sid == "mask":
                 if depth_mm is not None:
                     m = make_silhouette_mask(depth_mm)
@@ -1009,19 +995,37 @@ try:
                     m = make_pose_mask(h, w, result)
                 else:
                     m = np.zeros((h, w), dtype=np.uint8)
-                frame_data = cv2.cvtColor(m, cv2.COLOR_GRAY2BGR)
+                out = cv2.cvtColor(m, cv2.COLOR_GRAY2BGR)
             else:
+                out = display_frame
+            stream_cache[sid] = out
+            return out
+
+        # ---- локальное превью: копия + UI-оверлей, НИКОГДА не уходит наружу ----
+        if SHOW_PREVIEW:
+            preview_sid = runtime.get("preview_tab_stream", "skeleton")
+            preview_frame = get_stream_frame(preview_sid).copy()
+            draw_control_panel(preview_frame, runtime, h, w)
+            cv2.putText(preview_frame, f"FPS: {current_fps}", (10, 30),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2, cv2.LINE_AA)
+            cv2.putText(preview_frame, f"People: {people_present}", (10, 55),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2, cv2.LINE_AA)
+            cv2.imshow("Kinekt360 — [TAB] Panel  [Q] Quit", preview_frame)
+
+        if depth_mm is not None:
+            cv2.imshow("Depth / IR", depth_to_display(depth_mm))
+
+        # ---- публикация в Syphon: всегда чистые данные, без панели/текста ----
+        for sid, sv in syphon_servers.items():
+            if not runtime.get(f"stream_{sid}", False):
                 continue
+            frame_data = get_stream_frame(sid)
 
             if syphon_textures[sid] is None:
                 syphon_textures[sid] = create_mtl_texture(sv.device, w, h)
             rgba = cv2.cvtColor(frame_data, cv2.COLOR_BGR2RGBA)
             copy_image_to_mtl_texture(rgba, syphon_textures[sid])
             sv.publish_frame_texture(syphon_textures[sid])
-
-        # draw control panel
-        if SHOW_PREVIEW:
-            draw_control_panel(display_frame, runtime, h, w)
 
         key = cv2.waitKey(1) & 0xFF
         if key == ord("q"):
