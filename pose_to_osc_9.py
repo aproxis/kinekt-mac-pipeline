@@ -440,6 +440,11 @@ def save_mappings(data):
     with open(path, "w") as f:
         json.dump(data, f, indent=2)
     print(f"Saved profile '{current_profile}': {len(data)} mappings")
+    # сразу ре-валидируем guard, чтобы новые маппинги применялись без переключения профиля
+    try:
+        ableton_guard.validate(force=True)
+    except Exception:
+        pass
 
 
 def load_profile(name):
@@ -453,6 +458,10 @@ def load_profile(name):
         live_mappings = data
     current_profile = name
     print(f"Switched to profile '{name}': {len(data)} mappings")
+    try:
+        ableton_guard.validate(force=True)
+    except Exception:
+        pass
     return data
 
 
@@ -474,42 +483,46 @@ def delete_profile(name):
 
 
 # ==== ABLETON SCANNER ====
-def ableton_query(address, *args, timeout=4):
-    listener = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-    listener.bind(("0.0.0.0", 11001))
-    listener.settimeout(0.01)
-    for _ in range(500):
-        try:
-            listener.recvfrom(65535)
-        except socket.timeout:
-            break
+ableton_socket_lock = threading.Lock()   # сериализация доступа к порту 11001
 
-    sender = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    try:
-        builder = OscMessageBuilder(address)
-        for a in args:
-            if isinstance(a, int):
-                builder.add_arg(a, "i")
-            elif isinstance(a, float):
-                builder.add_arg(a, "f")
-            else:
-                builder.add_arg(str(a), "s")
-        sender.sendto(builder.build().dgram, (ABLETON_OSC_IP, ABLETON_OSC_PORT))
-        deadline = time.time() + timeout
-        while time.time() < deadline:
-            listener.settimeout(max(0.01, deadline - time.time()))
+
+def ableton_query(address, *args, timeout=4):
+    with ableton_socket_lock:
+        listener = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        listener.bind(("0.0.0.0", 11001))
+        listener.settimeout(0.01)
+        for _ in range(500):
             try:
-                data, _ = listener.recvfrom(65535)
-                parsed = osc_message.OscMessage(data)
-                if parsed.address != "/live/error" and parsed.address != "/live/startup":
-                    return parsed
+                listener.recvfrom(65535)
             except socket.timeout:
-                return None
-        return None
-    finally:
-        sender.close()
-        listener.close()
+                break
+
+        sender = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        try:
+            builder = OscMessageBuilder(address)
+            for a in args:
+                if isinstance(a, int):
+                    builder.add_arg(a, "i")
+                elif isinstance(a, float):
+                    builder.add_arg(a, "f")
+                else:
+                    builder.add_arg(str(a), "s")
+            sender.sendto(builder.build().dgram, (ABLETON_OSC_IP, ABLETON_OSC_PORT))
+            deadline = time.time() + timeout
+            while time.time() < deadline:
+                listener.settimeout(max(0.01, deadline - time.time()))
+                try:
+                    data, _ = listener.recvfrom(65535)
+                    parsed = osc_message.OscMessage(data)
+                    if parsed.address != "/live/error" and parsed.address != "/live/startup":
+                        return parsed
+                except socket.timeout:
+                    return None
+            return None
+        finally:
+            sender.close()
+            listener.close()
 
 
 def scan_ableton():
@@ -635,29 +648,34 @@ class AbletonGuard:
         self.msg_times.append(now)
 
     def peek_errors(self):
-        """Неблокирующий пик на 11001: если прилетел /live/error — включаем backoff."""
+        """Неблокирующий пик на 11001: /live/error после НАШИХ отправок → backoff."""
         if self.backoff_until > time.time():
             return
-        try:
-            s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-            s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-            s.bind(("0.0.0.0", 11001))
-            s.setblocking(False)
+        now = time.time()
+        # backoff только если мы сами недавно слали — иначе это чужие ошибки (старый мусор)
+        if not self.msg_times or now - self.msg_times[-1] > 0.5:
+            return
+        with ableton_socket_lock:
             try:
-                while True:
-                    data, _ = s.recvfrom(65535)
-                    parsed = osc_message.OscMessage(data)
-                    if parsed.address == "/live/error":
-                        self.backoff_until = time.time() + self.backoff_seconds
-                        self.status = "backoff"
-                        print(f"[AbletonGuard] Ошибка AbletonOSC, пауза {self.backoff_seconds}с")
-                        break
-            except (BlockingIOError, socket.timeout):
+                s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+                s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+                s.bind(("0.0.0.0", 11001))
+                s.setblocking(False)
+                try:
+                    while True:
+                        data, _ = s.recvfrom(65535)
+                        parsed = osc_message.OscMessage(data)
+                        if parsed.address == "/live/error":
+                            self.backoff_until = time.time() + self.backoff_seconds
+                            self.status = "backoff"
+                            print(f"[AbletonGuard] Ошибка AbletonOSC, пауза {self.backoff_seconds}с")
+                            break
+                except (BlockingIOError, socket.timeout):
+                    pass
+                finally:
+                    s.close()
+            except Exception:
                 pass
-            finally:
-                s.close()
-        except Exception:
-            pass
 
     def status_dict(self):
         return {
