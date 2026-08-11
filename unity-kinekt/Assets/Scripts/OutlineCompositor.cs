@@ -175,7 +175,7 @@ public class OutlineCompositor : MonoBehaviour
             }
 
             outlineMat.SetTexture("_MainTex", frames[i].texture);
-            outlineMat.SetColor("_OutlineColor", TrailColor(frames[i].color, age, sticky));
+            outlineMat.SetColor("_OutlineColor", TrailColor(frames[i].color, age, stickyColors));
             outlineMat.SetFloat("_OutlineWidth", outlineWidth);
             outlineMat.SetFloat("_FadePower", fadePower);
             outlineMat.SetVector("_UVOffset", uvOffset);
