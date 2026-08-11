@@ -43,15 +43,17 @@ public class OutlineCompositor : MonoBehaviour
         ringBuffer = GetComponent<RingBuffer>();
         ringBuffer.capacity = snapshotCapacity;
 
-        // если на объекте есть компонент, реализующий ITrailMotion (например TrailCarousel) —
-        // используем его вместо встроенного линейного дрифта
-        motion = GetComponent<ITrailMotion>();
-
         outlineMat = new Material(Shader.Find("Kinekt/OutlineComposite"));
     }
 
     void Update()
     {
+        // пересчитываем каждый кадр: GetComponent возвращает и ОТКЛЮЧЁННЫЕ компоненты,
+        // поэтому проверяем enabled — галочка TrailCarousel срабатывает мгновенно,
+        // в т.ч. в Play Mode
+        var candidate = GetComponent<ITrailMotion>();
+        motion = (candidate is Behaviour b && b.enabled) ? candidate : null;
+
         if (liveMaskTexture == null) return;
 
         int w = liveMaskTexture.width;

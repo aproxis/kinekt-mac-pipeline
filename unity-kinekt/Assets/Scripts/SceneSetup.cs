@@ -11,8 +11,11 @@ public class SceneSetup : MonoBehaviour
         var comp = cam.GetComponent<MaskCapture>();
         var syphon = cam.GetComponent<Klak.Syphon.SyphonClient>();
         bool hasTex = syphon != null && syphon.Texture != null;
+        var carousel = cam.GetComponent<TrailCarousel>();
+        string trailMode = (carousel != null && carousel.enabled) ? "Carousel" : "Linear";
+        int ringSnapshots = cam.GetComponent<RingBuffer>()?.Count ?? 0;
 
-        GUILayout.BeginArea(new Rect(10, 10, 500, 140));
+        GUILayout.BeginArea(new Rect(10, 10, 500, 160));
         GUILayout.Label("Kinekt360 — Outline Effect");
         GUILayout.Label($"Camera: {(cam != null ? "OK" : "MISSING")}");
         GUILayout.Label($"MaskCapture: {(comp != null ? "OK" : "MISSING — add to Camera")}");
@@ -20,6 +23,7 @@ public class SceneSetup : MonoBehaviour
         GUILayout.Label(hasTex
             ? $"Syphon Texture: RECEIVING {syphon.Texture.width}x{syphon.Texture.height}"
             : "Syphon Texture: waiting for Python...");
+        GUILayout.Label($"Trail: {trailMode}   Snapshots: {ringSnapshots}");
         GUILayout.EndArea();
 
         // сырое превью Syphon-текстуры В ОБХОД OutlineCompositor —
