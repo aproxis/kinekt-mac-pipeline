@@ -228,6 +228,8 @@ SYPHON_NAME = "KinectSkeleton"
 SEND_MASK_SYPHON = True
 MASK_SYPHON_NAME = "KinectMask"
 MODEL_PATH = "pose_landmarker.task"
+SELFIE_MODEL_PATH = "selfie_segmentation.tflite"
+SELFIE_THRESHOLD = 0.5
 SHOW_PREVIEW = True
 SHOW_DEPTH_PREVIEW = True
 USE_DEPTH_MASK = True
@@ -324,22 +326,88 @@ def make_silhouette_mask(depth_mm):
     return mask
 
 
+# ==== SELFIE SEGMENTATION (webcam fallback маска) ====
+segmenter = None
+segmenter_init_tried = False
+
+
+def init_segmenter():
+    """Ленивая инициализация — только когда реально нужна (webcam без depth)."""
+    global segmenter, segmenter_init_tried
+    if segmenter_init_tried:
+        return segmenter
+    segmenter_init_tried = True
+    try:
+        seg_opts = vision.ImageSegmenterOptions(
+            base_options=mp_python.BaseOptions(model_asset_path=SELFIE_MODEL_PATH),
+            running_mode=vision.RunningMode.VIDEO,
+            output_confidence_masks=True,
+        )
+        segmenter = vision.ImageSegmenter.create_from_options(seg_opts)
+        print("Selfie segmentation: загружена (webcam fallback маска)")
+    except Exception as e:
+        print(f"Selfie segmentation: не удалось загрузить ({e}) — "
+              f"используется pose-полигон")
+    return segmenter
+
+
+def make_selfie_mask(h, w, mp_image, timestamp_ms):
+    """Пиксельная сегментация человека из RGB. Возвращает None если модель недоступна."""
+    seg = init_segmenter()
+    if seg is None:
+        return None
+    try:
+        result = seg.segment_for_video(mp_image, timestamp_ms)
+        if not result.confidence_masks:
+            return None
+        conf = result.confidence_masks[0].numpy_view()   # (H, W) float 0..1
+        binary = (conf > SELFIE_THRESHOLD).astype(np.uint8) * 255
+        if binary.shape != (h, w):
+            binary = cv2.resize(binary, (w, h), interpolation=cv2.INTER_NEAREST)
+        kernel = np.ones((5, 5), np.uint8)
+        binary = cv2.morphologyEx(binary, cv2.MORPH_OPEN, kernel)
+        binary = cv2.morphologyEx(binary, cv2.MORPH_CLOSE, kernel)
+        return binary
+    except Exception:
+        return None
+
+
+# Правильный порядок обхода тела для человекообразного контура
+# (не z-order MediaPipe — тот даёт спайки между конечностями)
+BODY_OUTLINE_ORDER = [
+    0,   # nose
+    11,  # left_shoulder
+    13,  # left_elbow
+    15,  # left_wrist
+    16,  # right_wrist
+    14,  # right_elbow
+    12,  # right_shoulder
+    24,  # right_hip
+    26,  # right_knee
+    28,  # right_ankle
+    27,  # left_ankle
+    25,  # left_knee
+    23,  # left_hip
+]
+
+
 def make_pose_mask(h, w, pose_results):
     mask = np.zeros((h, w), dtype=np.uint8)
     if not pose_results or not pose_results.pose_landmarks:
         return mask
     for landmarks in pose_results.pose_landmarks:
-        pts = []
-        for lm in landmarks:
-            x = int((1.0 - lm.x) * w)
-            y = int(lm.y * h)
-            pts.append((x, y))
-        body = np.array(pts, dtype=np.int32)
+        pts = {}
+        for idx, lm in enumerate(landmarks):
+            pts[idx] = (int((1.0 - lm.x) * w), int(lm.y * h))
+        contour = [pts[i] for i in BODY_OUTLINE_ORDER if i in pts]
+        if len(contour) < 3:
+            continue
+        body = np.array(contour, dtype=np.int32)
         cv2.fillPoly(mask, [body], 255)
-        # draw skeleton lines thicker
+        # скелет поверх: тонкие линии, чтобы руки не слипались в один ком
         for a, b in POSE_CONNECTIONS:
-            if a < len(pts) and b < len(pts):
-                cv2.line(mask, pts[a], pts[b], 255, 6)
+            if a in pts and b in pts:
+                cv2.line(mask, pts[a], pts[b], 255, 2)
     kernel = np.ones((5, 5), np.uint8)
     mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel)
     return mask
@@ -1144,12 +1212,15 @@ try:
                 else:
                     out = np.zeros((h, w, 3), dtype=np.uint8)
             elif sid == "mask":
+                # приоритет: depth → selfie-сегментация → pose-полигон
                 if depth_mm is not None:
                     m = make_silhouette_mask(depth_mm)
-                elif result.pose_landmarks:
-                    m = make_pose_mask(h, w, result)
                 else:
-                    m = np.zeros((h, w), dtype=np.uint8)
+                    m = make_selfie_mask(h, w, mp_image, timestamp_ms)
+                    if m is None or not m.any() and result.pose_landmarks:
+                        m = make_pose_mask(h, w, result)
+                    if m is None:
+                        m = np.zeros((h, w), dtype=np.uint8)
                 out = cv2.cvtColor(m, cv2.COLOR_GRAY2BGR)
             else:
                 out = display_frame

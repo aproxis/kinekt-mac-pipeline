@@ -19,7 +19,14 @@ venv/
 
 # Model files (large binary)
 pose_landmarker.task
+selfie_segmentation.tflite
 
 # Environment
 .env
 *.local
+unity-kinekt/Library/
+unity-kinekt/Logs/
+unity-kinekt/UserSettings/
+unity-kinekt/obj/
+unity-kinekt/*.csproj
+unity-kinekt/*.sln
