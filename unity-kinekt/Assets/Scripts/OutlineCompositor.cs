@@ -4,6 +4,10 @@ using System.Collections.Generic;
 [RequireComponent(typeof(RingBuffer))]
 public class OutlineCompositor : MonoBehaviour
 {
+    // Режим "липких" цветов: цвет фиксируется в момент захвата снепшота
+    // и навсегда остаётся у этой копии, а живой кадр шагает дальше.
+    public enum ColorStepMode { Off, Timer, Motion }
+
     [Header("Outline")]
     public Color outlineColor = Color.cyan;
     public Color trailColorNew = Color.cyan;
@@ -32,6 +36,16 @@ public class OutlineCompositor : MonoBehaviour
     [Tooltip("Живой кадр тоже красится радугой (синхронно с самым свежим трейлом)")]
     public bool rainbowLive = true;
 
+    [Header("Color Steps (липкие цвета — цвет прилипает к снепшоту при захвате)")]
+    [Tooltip("Off = как раньше. Timer = цвет шагает по таймеру. Motion = цвет шагает на каждое реальное движение")]
+    public ColorStepMode colorStepMode = ColorStepMode.Off;
+    [Tooltip("Timer-режим: каждые N секунд — новый цвет")]
+    [Range(0.3f, 5f)] public float colorStepInterval = 1f;
+    [Tooltip("Шаг оттенка за один шаг (0.1 = 10% круга радуги)")]
+    [Range(0f, 0.25f)] public float colorStepHueDelta = 0.1f;
+    [Tooltip("Motion-режим: минимальное движение маски для нового снепшота (0..1)")]
+    [Range(0.005f, 0.2f)] public float motionThreshold = 0.02f;
+
     [Header("Performance")]
     public int snapshotCapacity = 16;
 
@@ -42,10 +56,26 @@ public class OutlineCompositor : MonoBehaviour
     public RenderTexture liveMaskTexture;
 
     private RingBuffer ringBuffer;
-    private ITrailMotion motion;         // либо TrailCarousel, либо встроенный линейный дрифт
+    private ITrailMotion motion;
     private Material outlineMat;
     private RenderTexture compositeRT;
     private readonly List<int> drawOrder = new List<int>();
+
+    // ---- липкие цвета ----
+    private float stepTimer;
+    private float stepHue;
+
+    public ColorStepMode StepMode => colorStepMode;
+
+    // Цвет живого кадра сейчас — его получают новые снепшоты при захвате
+    public Color CurrentColor => Color.HSVToRGB(stepHue, rainbowSaturation, rainbowValue);
+
+    // Вызывается из MaskCapture после каждого захвата снепшота
+    public void NotifyCapture()
+    {
+        if (colorStepMode == ColorStepMode.Motion)
+            AdvanceColor();
+    }
 
     void Start()
     {
@@ -58,10 +88,20 @@ public class OutlineCompositor : MonoBehaviour
     void Update()
     {
         // пересчитываем каждый кадр: GetComponent возвращает и ОТКЛЮЧЁННЫЕ компоненты,
-        // поэтому проверяем enabled — галочка TrailCarousel срабатывает мгновенно,
-        // в т.ч. в Play Mode
+        // поэтому проверяем enabled — галочка TrailCarousel срабатывает мгновенно
         var candidate = GetComponent<ITrailMotion>();
         motion = (candidate is Behaviour b && b.enabled) ? candidate : null;
+
+        // Timer-режим: цвет шагает по таймеру
+        if (colorStepMode == ColorStepMode.Timer)
+        {
+            stepTimer += Time.deltaTime;
+            if (stepTimer >= colorStepInterval)
+            {
+                stepTimer = 0f;
+                AdvanceColor();
+            }
+        }
 
         if (liveMaskTexture == null) return;
 
@@ -79,26 +119,24 @@ public class OutlineCompositor : MonoBehaviour
         GL.Clear(false, true, Color.clear);
         RenderTexture.active = null;
 
+        bool stickyColors = colorStepMode != ColorStepMode.Off;
+
         // ---- pass 0: живой силуэт/контур ----
         outlineMat.SetFloat("_LiveAlpha", liveAlpha);
         outlineMat.SetFloat("_LiveIsOutline", liveFill ? 0 : 1);
         outlineMat.SetFloat("_OutlineWidth", outlineWidth);
-        // радуга для живого кадра: hue совпадает с самым свежим трейлом (age=0)
-        outlineMat.SetColor("_OutlineColor",
-            rainbowMode && rainbowLive ? RainbowColor(0f) : outlineColor);
-        outlineMat.SetFloat("_HueShift", rainbowMode ? 0 : hueShift);
+        outlineMat.SetColor("_OutlineColor", LiveColor());
+        outlineMat.SetFloat("_HueShift", stickyColors || rainbowMode ? 0 : hueShift);
         Graphics.Blit(liveMaskTexture, compositeRT, outlineMat, 0);
 
         // ---- pass 1: трейл ----
-        var snapshots = ringBuffer.Snapshots; // i=0 старый .. i=count-1 новый
-        int count = snapshots.Length;
+        var frames = ringBuffer.Frames; // i=0 старый .. i=count-1 новый
+        int count = frames.Length;
 
         drawOrder.Clear();
         for (int i = 0; i < count; i++)
-            if (snapshots[i] != null) drawOrder.Add(i);
+            if (frames[i].texture != null) drawOrder.Add(i);
 
-        // если есть кастомный motion (карусель) — рисуем дальние копии первыми,
-        // ближние поверх, иначе порядок перекрытия будет выглядеть криво
         if (motion != null && drawOrder.Count > 1)
         {
             drawOrder.Sort((a, b) =>
@@ -128,7 +166,6 @@ public class OutlineCompositor : MonoBehaviour
             }
             else
             {
-                // встроенный линейный дрифт (старое поведение по умолчанию)
                 Vector2 dir = driftDirection.sqrMagnitude > 0.0001f ? driftDirection.normalized : Vector2.zero;
                 uvOffset = dir * (driftAmount * age);
                 float s = 1f + scaleAmount * age;
@@ -137,27 +174,48 @@ public class OutlineCompositor : MonoBehaviour
                 mirror = 0f;
             }
 
-            outlineMat.SetTexture("_MainTex", snapshots[i]);
-            // радуга по возрасту: age=0 красный -> age=1 фиолетовый
-            outlineMat.SetColor("_OutlineColor",
-                rainbowMode ? RainbowColor(age) : Color.Lerp(trailColorNew, trailColorOld, age));
+            outlineMat.SetTexture("_MainTex", frames[i].texture);
+            outlineMat.SetColor("_OutlineColor", TrailColor(frames[i].color, age, sticky));
             outlineMat.SetFloat("_OutlineWidth", outlineWidth);
             outlineMat.SetFloat("_FadePower", fadePower);
             outlineMat.SetVector("_UVOffset", uvOffset);
             outlineMat.SetVector("_UVScale", uvScale);
             outlineMat.SetFloat("_Mirror", mirror);
-            outlineMat.SetFloat("_HueShift", rainbowMode ? 0 : hueShift);
+            outlineMat.SetFloat("_HueShift", stickyColors || rainbowMode ? 0 : hueShift);
             outlineMat.SetFloat("_Age", age);
             outlineMat.SetFloat("_TrailAlpha", trailAlpha * depthAlpha);
 
-            Graphics.Blit(snapshots[i], compositeRT, outlineMat, 1);
+            Graphics.Blit(frames[i].texture, compositeRT, outlineMat, 1);
         }
     }
 
-    // Цвет радуги по возрасту снепшота (age 0..1).
-    // rainbowTurns — сколько полных кругов оттенка на весь трейл,
-    // rainbowSpeed — сдвиг оттенка по времени (радуга "течёт").
-    private Color RainbowColor(float age)
+    // Цвет живого кадра: липкий -> текущий шаг; иначе радуга/базовый
+    Color LiveColor()
+    {
+        if (colorStepMode != ColorStepMode.Off)
+            return CurrentColor;
+        if (rainbowMode && rainbowLive)
+            return RainbowColor(0f);
+        return outlineColor;
+    }
+
+    // Цвет копии трейла: липкий -> сохранённый при захвате; иначе радуга по возрасту; иначе градиент
+    Color TrailColor(Color storedColor, float age, bool sticky)
+    {
+        if (sticky)
+            return storedColor;
+        if (rainbowMode)
+            return RainbowColor(age);
+        return Color.Lerp(trailColorNew, trailColorOld, age);
+    }
+
+    void AdvanceColor()
+    {
+        stepHue = (stepHue + colorStepHueDelta) % 1f;
+    }
+
+    // Цвет радуги по возрасту снепшота (age 0..1)
+    Color RainbowColor(float age)
     {
         float hue = (age * rainbowTurns + Time.time * rainbowSpeed) % 1f;
         return Color.HSVToRGB(hue, rainbowSaturation, rainbowValue);
