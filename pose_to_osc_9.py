@@ -559,6 +559,119 @@ def scan_ableton():
         ableton_scanning = False
 
 
+# ==== ABLETON GUARD (защита от переспама) ====
+class AbletonGuard:
+    def __init__(self):
+        self.valid_targets = set()       # {(track, device, param)}
+        self.last_validate = 0.0
+        self.validate_interval = 30.0    # пере-валидация каждые 30 сек
+        self.last_sent = {}              # mapping_id -> timestamp
+        self.min_interval = 0.05         # 50ms между отправками одного маппинга
+        self.msg_times = []              # времена последних отправок (rate limit)
+        self.max_msg_per_sec = 60
+        self.backoff_until = 0.0
+        self.backoff_seconds = 5.0
+        self.status = "unknown"          # unknown | ok | backoff | live_offline
+        self.invalid_mappings = set()    # id маппингов с битыми индексами
+
+    def validate(self, force=False):
+        """Лёгкий скан структуры Ableton: собираем валидные (track, device, param)."""
+        now = time.time()
+        if not force and now - self.last_validate < self.validate_interval:
+            return
+        self.last_validate = now
+
+        targets = set()
+        try:
+            r = ableton_query("/live/song/get/num_tracks", timeout=2)
+            num_tracks = int(r.params[-1]) if r else 0
+            for t in range(num_tracks):
+                r = ableton_query("/live/track/get/num_devices", t, timeout=2)
+                num_dev = int(r.params[-1]) if r else 0
+                for d in range(num_dev):
+                    r = ableton_query("/live/device/get/num_parameters", t, d, timeout=2)
+                    num_p = int(r.params[-1]) if r else 0
+                    for p in range(num_p):
+                        targets.add((t, d, p))
+            self.valid_targets = targets
+            self.status = "ok"
+        except Exception:
+            self.status = "live_offline"
+
+        # обновляем список битых маппингов
+        with mappings_lock:
+            self.invalid_mappings = {
+                m["id"] for m in live_mappings
+                if (m.get("track", 0), m.get("device", 0), m.get("param", 0)) not in self.valid_targets
+            }
+
+    def can_send(self, m):
+        """Проверка 3 слоёв: backoff, rate limit, валидность."""
+        now = time.time()
+
+        # слой 3: глобальный backoff после ошибки
+        if now < self.backoff_until:
+            return False
+
+        # слой 1: структурная валидация
+        if (m.get("track", 0), m.get("device", 0), m.get("param", 0)) not in self.valid_targets:
+            return False
+
+        # слой 2: per-mapping rate limit
+        last = self.last_sent.get(m.get("id"))
+        if last is not None and now - last < self.min_interval:
+            return False
+
+        # слой 2: общий rate limit
+        self.msg_times = [t for t in self.msg_times if now - t < 1.0]
+        if len(self.msg_times) >= self.max_msg_per_sec:
+            return False
+
+        return True
+
+    def mark_sent(self, m):
+        now = time.time()
+        self.last_sent[m.get("id")] = now
+        self.msg_times.append(now)
+
+    def peek_errors(self):
+        """Неблокирующий пик на 11001: если прилетел /live/error — включаем backoff."""
+        if self.backoff_until > time.time():
+            return
+        try:
+            s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            s.bind(("0.0.0.0", 11001))
+            s.setblocking(False)
+            try:
+                while True:
+                    data, _ = s.recvfrom(65535)
+                    parsed = osc_message.OscMessage(data)
+                    if parsed.address == "/live/error":
+                        self.backoff_until = time.time() + self.backoff_seconds
+                        self.status = "backoff"
+                        print(f"[AbletonGuard] Ошибка AbletonOSC, пауза {self.backoff_seconds}с")
+                        break
+            except (BlockingIOError, socket.timeout):
+                pass
+            finally:
+                s.close()
+        except Exception:
+            pass
+
+    def status_dict(self):
+        return {
+            "status": self.status,
+            "valid_targets": len(self.valid_targets),
+            "invalid_mappings": sorted(self.invalid_mappings),
+            "backoff_until": self.backoff_until,
+            "msg_per_sec_limit": self.max_msg_per_sec,
+        }
+
+
+ableton_guard = AbletonGuard()
+
+
 # ==== WEB SERVER ====
 def web_server():
     class Handler(BaseHTTPRequestHandler):
@@ -586,7 +699,11 @@ def web_server():
                     self.send_json({"name": current_profile, "mappings": live_mappings})
 
             elif path == "/api/ableton/scan":
+                ableton_guard.validate(force=True)
                 self.send_json(scan_ableton())
+
+            elif path == "/api/ableton/status":
+                self.send_json(ableton_guard.status_dict())
 
             elif path == "/":
                 self.send_response(200)
@@ -696,6 +813,11 @@ def send_osc(address, value):
 
 load_mappings()
 
+# стартовая валидация Ableton структуры (guard)
+ableton_guard.validate(force=True)
+if ableton_guard.invalid_mappings:
+    print(f"[AbletonGuard] Маппинги с битыми индексами (не будут слаться): "
+          f"{sorted(ableton_guard.invalid_mappings)}")
 base_options = mp_python.BaseOptions(model_asset_path=MODEL_PATH)
 options = vision.PoseLandmarkerOptions(
     base_options=base_options,
@@ -864,6 +986,12 @@ try:
             fps_timer = now
             send_osc("/fps", current_fps)
 
+        # Ableton guard: периодическая валидация + пик ошибок (раз в ~0.5с)
+        if ableton_client is not None:
+            ableton_guard.validate()
+            if frame_counter % 15 == 0:
+                ableton_guard.peek_errors()
+
         should_print = (
             PRINT_COORDS_TO_CONSOLE and frame_counter % CONSOLE_PRINT_EVERY_N_FRAMES == 0
         )
@@ -917,8 +1045,9 @@ try:
                                         last = last_sent.get(skey)
                                         if threshold and last is not None and abs(sval - last) < threshold:
                                             pass
-                                        else:
+                                        elif ableton_guard.can_send(m):
                                             last_sent[skey] = sval
+                                            ableton_guard.mark_sent(m)
                                             ableton_client.send_message(
                                                 "/live/device/set/parameter/value",
                                                 [m["track"], m["device"], m["param"], sval]
