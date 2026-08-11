@@ -23,6 +23,15 @@ public class OutlineCompositor : MonoBehaviour
     [Header("Hue (поверх градиента цвета трейла)")]
     [Range(0, 1)] public float hueShift;
 
+    [Header("Rainbow (цвета радуги по возрасту трейла)")]
+    public bool rainbowMode;
+    [Range(0, 1)] public float rainbowSaturation = 1f;
+    [Range(0, 1)] public float rainbowValue = 1f;
+    [Range(0.5f, 3f)] public float rainbowTurns = 1f;
+    [Range(0, 0.5f)] public float rainbowSpeed;
+    [Tooltip("Живой кадр тоже красится радугой (синхронно с самым свежим трейлом)")]
+    public bool rainbowLive = true;
+
     [Header("Performance")]
     public int snapshotCapacity = 16;
 
@@ -74,7 +83,10 @@ public class OutlineCompositor : MonoBehaviour
         outlineMat.SetFloat("_LiveAlpha", liveAlpha);
         outlineMat.SetFloat("_LiveIsOutline", liveFill ? 0 : 1);
         outlineMat.SetFloat("_OutlineWidth", outlineWidth);
-        outlineMat.SetColor("_OutlineColor", outlineColor);
+        // радуга для живого кадра: hue совпадает с самым свежим трейлом (age=0)
+        outlineMat.SetColor("_OutlineColor",
+            rainbowMode && rainbowLive ? RainbowColor(0f) : outlineColor);
+        outlineMat.SetFloat("_HueShift", rainbowMode ? 0 : hueShift);
         Graphics.Blit(liveMaskTexture, compositeRT, outlineMat, 0);
 
         // ---- pass 1: трейл ----
@@ -126,18 +138,29 @@ public class OutlineCompositor : MonoBehaviour
             }
 
             outlineMat.SetTexture("_MainTex", snapshots[i]);
-            outlineMat.SetColor("_OutlineColor", Color.Lerp(trailColorNew, trailColorOld, age));
+            // радуга по возрасту: age=0 красный -> age=1 фиолетовый
+            outlineMat.SetColor("_OutlineColor",
+                rainbowMode ? RainbowColor(age) : Color.Lerp(trailColorNew, trailColorOld, age));
             outlineMat.SetFloat("_OutlineWidth", outlineWidth);
             outlineMat.SetFloat("_FadePower", fadePower);
             outlineMat.SetVector("_UVOffset", uvOffset);
             outlineMat.SetVector("_UVScale", uvScale);
             outlineMat.SetFloat("_Mirror", mirror);
-            outlineMat.SetFloat("_HueShift", hueShift);
+            outlineMat.SetFloat("_HueShift", rainbowMode ? 0 : hueShift);
             outlineMat.SetFloat("_Age", age);
             outlineMat.SetFloat("_TrailAlpha", trailAlpha * depthAlpha);
 
             Graphics.Blit(snapshots[i], compositeRT, outlineMat, 1);
         }
+    }
+
+    // Цвет радуги по возрасту снепшота (age 0..1).
+    // rainbowTurns — сколько полных кругов оттенка на весь трейл,
+    // rainbowSpeed — сдвиг оттенка по времени (радуга "течёт").
+    private Color RainbowColor(float age)
+    {
+        float hue = (age * rainbowTurns + Time.time * rainbowSpeed) % 1f;
+        return Color.HSVToRGB(hue, rainbowSaturation, rainbowValue);
     }
 
     // i=0 (самый старый в очереди) -> age=1; i=count-1 (самый новый) -> age=0
