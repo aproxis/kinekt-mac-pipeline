@@ -594,10 +594,16 @@ class AbletonGuard:
             return
         self.last_validate = now
 
-        targets = set()
         try:
             r = ableton_query("/live/song/get/num_tracks", timeout=2)
-            num_tracks = int(r.params[-1]) if r else 0
+            # Ableton не ответил — НЕ затираем старые targets, иначе все маппинги
+            # станут invalid до следующей удачной валидации (баг "надо переключить профиль")
+            if r is None:
+                self.status = "live_offline"
+                return
+
+            num_tracks = int(r.params[-1])
+            targets = set()
             for t in range(num_tracks):
                 r = ableton_query("/live/track/get/num_devices", t, timeout=2)
                 num_dev = int(r.params[-1]) if r else 0
@@ -662,6 +668,9 @@ class AbletonGuard:
                 s.bind(("0.0.0.0", 11001))
                 s.setblocking(False)
                 try:
+                    # дренируем ВЕСЬ буфер: если наткнулись на ошибку — ставим backoff,
+                    # но продолжаем вычитывать остаток, чтобы старый мусор
+                    # не ретриггерил backoff каждые 5 секунд
                     while True:
                         data, _ = s.recvfrom(65535)
                         parsed = osc_message.OscMessage(data)
@@ -669,7 +678,6 @@ class AbletonGuard:
                             self.backoff_until = time.time() + self.backoff_seconds
                             self.status = "backoff"
                             print(f"[AbletonGuard] Ошибка AbletonOSC, пауза {self.backoff_seconds}с")
-                            break
                 except (BlockingIOError, socket.timeout):
                     pass
                 finally:
