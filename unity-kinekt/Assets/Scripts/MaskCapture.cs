@@ -45,7 +45,8 @@ public class MaskCapture : MonoBehaviour
     void Update()
     {
         frameCount++;
-        if (frameCount % captureInterval != 0) return;
+        int interval = Mathf.Max(1, captureInterval); // защита от 0 — иначе деление на ноль
+        if (frameCount % interval != 0) return;
 
         var source = client.Texture;
         if (source == null) return;
