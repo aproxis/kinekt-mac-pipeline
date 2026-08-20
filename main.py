@@ -1,434 +1,43 @@
 """
-Multi-person skeleton tracking (Kinect RGB + depth + live tilt) -> OSC (Resolume Arena)
+Kinekt360 — Kinect on Mac pipeline (модульная архитектура).
 
-Единый device-хендл Kinect для видео/depth/тилта (без sync API).
-Smoothing координат + детекция жестов + FPS + Web UI.
-
-Требует:
-    pip install mediapipe opencv-python python-osc
-    pose_landmarker.task рядом со скриптом
+  main.py                    — оркестрация (этот файл)
+  config.py                  — статические настройки
+  state.py                   — разделяемое состояние
+  profiles.py                — конфиги маппингов
+  modules/input/camera.py    — Kinect / webcam (FrameSource)
+  modules/process/pose.py    — MediaPipe pose + скелет + жесты
+  modules/process/mask.py    — маски: depth / selfie / pose
+  modules/output/osc.py      — OSC (Resolume + monitor)
+  modules/output/ableton.py  — AbletonOSC + guard + маппинг
+  modules/output/syphon.py   — 5 Syphon-стримов
+  modules/output/webui.py    — HTTP Web UI
+  modules/ui/panel.py        — OpenCV-панель управления
 
 Запуск:
     source venv/bin/activate
-    python pose_to_osc_6.py
-
-Управление в окне превью: I = тилт вверх, K = тилт вниз, Q = выход.
-Web UI: http://localhost:8080
+    python main.py
 """
-
-import socket
-import json
-import os
 import time
+
 import cv2
-import numpy as np
-import freenect
 import mediapipe as mp
-from mediapipe.tasks import python as mp_python
-from mediapipe.tasks.python import vision
 from pythonosc import udp_client
-from pythonosc import osc_message
-from pythonosc.osc_message_builder import OscMessageBuilder
-import threading
-from http.server import HTTPServer, BaseHTTPRequestHandler
-from urllib.parse import urlparse, parse_qs
 
-try:
-    import syphon
-    from syphon.utils.numpy import copy_image_to_mtl_texture
-    from syphon.utils.raw import create_mtl_texture
-    SYPHON_AVAILABLE = True
-except ImportError:
-    SYPHON_AVAILABLE = False
-
-# ==== RUNTIME CONTROLS (меняются через GUI) ====
-runtime = {
-    "num_poses": 2, "tilt": 0,
-    "send_osc": True, "send_osc_flat": True, "send_gestures": True,
-    "show_coords": False,
-    "camera_mode": "auto",
-    "panel_open": False,
-    "mouse_x": 0, "mouse_y": 0, "mouse_down": False,
-
-    # streams (Syphon output toggles)
-    "stream_skeleton": True,    # KinectSkeleton — RGB + skeleton
-    "stream_rgb": True,         # KinectRGB — clean RGB
-    "stream_depth": True,       # KinectDepth — depth colormap
-    "stream_ir": False,         # KinectIR — IR grayscale
-    "stream_mask": True,        # KinectMask — silhouette mask
-
-    # preview tab: 0=composite, 1=RGB, 2=depth, 3=IR, 4=mask
-    "preview_tab": 0,
-}
-
-SYPHON_STREAMS = {
-    "skeleton": {"name": "KinectSkeleton", "label": "Skeleton"},
-    "rgb": {"name": "KinectRGB", "label": "RGB"},
-    "depth": {"name": "KinectDepth", "label": "Depth"},
-    "ir": {"name": "KinectIR", "label": "IR"},
-    "mask": {"name": "KinectMask", "label": "Mask"},
-}
+import config
+import state
+import profiles
+from modules.input import camera as camera_mod
+from modules.process import mask as mask_mod
+from modules.process import pose as pose_mod
+from modules.output import ableton as ableton_mod
+from modules.output import osc as osc_mod
+from modules.output import syphon as syphon_mod
+from modules.output import webui
+from modules.ui import panel
 
 
-def draw_control_panel(frame, rt, h, w):
-    if not rt["panel_open"]:
-        overlay = frame.copy()
-        cv2.rectangle(overlay, (10, h - 40), (140, h - 5), (30, 30, 30), -1)
-        cv2.putText(overlay, "[TAB] Panel  [←→] Tabs", (18, h - 15),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.4, (100, 100, 100), 1, cv2.LINE_AA)
-        cv2.addWeighted(overlay, 0.6, frame, 0.4, 0, frame)
-        return
-
-    tab = rt.get("preview_tab", 0)
-    tabs = ["STREAMS", "SYSTEM", "OUTPUT"]
-    pw, ph = 300, 360
-    px, py = 10, 10
-
-    overlay = frame.copy()
-    cv2.rectangle(overlay, (px, py), (px + pw, py + ph), (20, 20, 30), -1)
-    cv2.addWeighted(overlay, 0.85, frame, 0.15, 0, frame)
-    cv2.rectangle(frame, (px, py), (px + pw, py + ph), (60, 60, 80), 1)
-
-    # tabs row
-    xo = px + 6
-    for i, t in enumerate(tabs):
-        act = i == tab
-        bg = (50, 60, 80) if act else (30, 30, 40)
-        tw = 80
-        cv2.rectangle(frame, (xo + i * (tw + 4), py + 4), (xo + i * (tw + 4) + tw, py + 22), bg, -1)
-        cv2.putText(frame, t, (xo + i * (tw + 4) + 6, py + 17),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.4, (220, 220, 240) if act else (120, 120, 140), 1, cv2.LINE_AA)
-        rt[f"_rect_tab_{i}"] = (xo + i * (tw + 4), py + 4, tw, 18)
-
-    y0 = py + 30
-    if tab == 0:
-        y = y0
-        y = _btn(frame, "Syphon Outputs", None, px + 8, y, 120, 18)
-        y = _sep(frame, px + 8, y, pw - 16)
-        for sid, sinfo in SYPHON_STREAMS.items():
-            key = f"stream_{sid}"
-            y = _toggle(frame, sinfo["label"], rt, key, px + 12, y, pw - 24, 20)
-            y += 2
-        y = _sep(frame, px + 8, y, pw - 16)
-        y = _btn(frame, "Preview tab:", None, px + 8, y, 90, 18)
-        y += 2
-        for idx, (sid, sinfo) in enumerate(SYPHON_STREAMS.items()):
-            key = f"preview_{sid}"
-            sel = sid == rt.get("preview_tab_stream", "skeleton")
-            bg = (50, 80, 60) if sel else (35, 35, 45)
-            xp = px + 12 + idx * (48 + 4)
-            cv2.rectangle(frame, (xp, y), (xp + 48, y + 20), bg, -1)
-            cv2.rectangle(frame, (xp, y), (xp + 48, y + 20), (70, 70, 70), 1)
-            cv2.putText(frame, sinfo["label"][:4], (xp + 3, y + 14),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.35, (200, 200, 200), 1, cv2.LINE_AA)
-            rt[f"_rect_preview_{sid}"] = (xp, y, 48, 20)
-        y += 26
-    elif tab == 1:
-        y = y0
-        y = _btn(frame, "Camera", None, px + 8, y, 60, 18)
-        cam_row_y = y - 22  # та же строка, что и лейбл "Camera"
-        rt["cam_kinect"] = (camera_mode == "kinect")
-        rt["cam_webcam"] = (camera_mode == "webcam")
-        _toggle(frame, "Kinect", rt, "cam_kinect", px + 70, cam_row_y, 60, 18)
-        _toggle(frame, "Webcam", rt, "cam_webcam", px + 135, cam_row_y, 60, 18)
-        y = _sep(frame, px + 8, y, pw - 16)
-        y = _btn(frame, "Track:", None, px + 8, y, 55, 18)
-        y = _slider(frame, rt, "num_poses", px + 65, y - 18, 100, 18, 1, 4, 1)
-        y = _sep(frame, px + 8, y, pw - 16)
-        y = _btn(frame, "Tilt:", None, px + 8, y, 40, 18)
-        y = _slider(frame, rt, "tilt", px + 50, y - 18, 150, 18, -30, 30, 5)
-        y = _sep(frame, px + 8, y, pw - 16)
-        y = _btn(frame, "Display:", None, px + 8, y, 65, 18)
-        y = _toggle(frame, "Coords", rt, "show_coords", px + 75, y - 18, 60, 18)
-    elif tab == 2:
-        y = y0
-        y = _btn(frame, "OSC Output", None, px + 8, y, 90, 18)
-        y = _sep(frame, px + 8, y, pw - 16)
-        y = _toggle(frame, "Joints", rt, "send_osc", px + 12, y, pw - 24, 20)
-        y = _toggle(frame, "Flat", rt, "send_osc_flat", px + 12, y + 2, pw - 24, 20)
-        y = _toggle(frame, "Gestures", rt, "send_gestures", px + 12, y + 4, pw - 24, 20)
-
-
-def _btn(frame, label, _u, x, y, w, h):
-    cv2.putText(frame, label, (x + 2, y + 13),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.4, (140, 140, 160), 1, cv2.LINE_AA)
-    return y + h + 4
-
-
-def _toggle(frame, label, rt, key, x, y, w, h):
-    val = rt.get(key, False)
-    bg = (40, 80, 50) if val else (45, 40, 40)
-    cv2.rectangle(frame, (x, y), (x + w, y + h), bg, -1)
-    cv2.rectangle(frame, (x, y), (x + w, y + h), (80, 80, 80), 1)
-    c = (180, 255, 180) if val else (180, 150, 150)
-    cv2.putText(frame, label, (x + 3, y + 14),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.38, c, 1, cv2.LINE_AA)
-    rt[f"_rect_{key}"] = (x, y, w, h)
-    return y + h + 2
-
-
-def _slider(frame, rt, key, x, y, w, h, vmin, vmax, step):
-    val = rt.get(key, vmin)
-    pct = (val - vmin) / (vmax - vmin)
-    cv2.rectangle(frame, (x, y), (x + w, y + h), (35, 35, 45), -1)
-    fw = int(w * pct)
-    cv2.rectangle(frame, (x, y), (x + fw, y + h), (50, 80, 120), -1)
-    cv2.rectangle(frame, (x, y), (x + w, y + h), (80, 80, 80), 1)
-    cv2.putText(frame, str(val), (x + 3, y + 14),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.4, (200, 200, 220), 1, cv2.LINE_AA)
-    rt[f"_rect_{key}"] = (x, y, w, h)
-    return y + h + 2
-
-
-def _sep(frame, x, y, w):
-    cv2.line(frame, (x, y), (x + w, y), (50, 50, 55), 1)
-    return y + 3
-
-
-def handle_click(rt, key, x, y):
-    for k, v in list(rt.items()):
-        if not k.startswith("_rect_"):
-            continue
-        rx, ry, rw, rh = v
-        vname = k.replace("_rect_", "")
-        if not (rx <= x <= rx + rw and ry <= y <= ry + rh):
-            continue
-
-        if vname.startswith("tab_"):
-            rt["preview_tab"] = int(vname.split("_")[1])
-            return True
-        if vname.startswith("preview_"):
-            rt["preview_tab_stream"] = vname.replace("preview_", "")
-            return True
-        if vname.startswith("stream_"):
-            rt[vname] = not rt.get(vname, False)
-            return True
-        if vname in ("cam_kinect", "cam_webcam"):
-            print("Переключение камеры на лету не поддерживается — перезапусти скрипт с другим источником.")
-            return True
-        if vname in ("send_osc", "send_osc_flat", "send_gestures", "show_coords"):
-            rt[vname] = not rt.get(vname, False)
-            return True
-        if vname == "num_poses":
-            rt["num_poses"] = rt.get("num_poses", 2) % 4 + 1
-            print(f"Track: {rt['num_poses']} — применится только при перезапуске скрипта "
-                  f"(PoseLandmarker создаётся один раз при старте)")
-            return True
-        if vname == "tilt":
-            rt["tilt"] = (rt.get("tilt", 0) + 5) % 65 - 30
-            return True
-    return False
-OSC_IP = "192.168.1.5"
-OSC_PORT = 7000
-MONITOR_OSC_IP = "127.0.0.1"
-MONITOR_OSC_PORT = 9001
-SEND_TO_MONITOR = True
-SEND_SYPHON = True
-SYPHON_NAME = "KinectSkeleton"
-SEND_MASK_SYPHON = True
-MASK_SYPHON_NAME = "KinectMask"
-MODEL_PATH = "pose_landmarker.task"
-SELFIE_MODEL_PATH = "selfie_segmentation.tflite"
-SELFIE_THRESHOLD = 0.5
-SHOW_PREVIEW = True
-SHOW_DEPTH_PREVIEW = True
-USE_DEPTH_MASK = True
-SHOW_COORDS_ON_FRAME = True
-PRINT_COORDS_TO_CONSOLE = False
-CONSOLE_PRINT_EVERY_N_FRAMES = 30
-
-OSC_SEND_FLAT = True
-
-CAMERA_SOURCE = "auto"
-SMOOTHING_ALPHA = 0.8   # глобальное сглаживание (0-1). Per-mapping в JSON переопределяет
-
-ABLETON_OSC_IP = "127.0.0.1"
-ABLETON_OSC_PORT = 11000
-SEND_TO_ABLETON = True
-
-MAPPINGS_PATH = "mappings.json"   # legacy fallback
-PROFILES_DIR = "profiles"
-CURRENT_PROFILE = "default"
-WEB_HOST = "0.0.0.0"
-WEB_PORT = 8080
-
-DEPTH_MIN_MM = 500
-DEPTH_MAX_MM = 2500
-
-LANDMARK_NAMES = {
-    0: "nose",
-    11: "left_shoulder", 12: "right_shoulder",
-    13: "left_elbow", 14: "right_elbow",
-    15: "left_wrist", 16: "right_wrist",
-    23: "left_hip", 24: "right_hip",
-    25: "left_knee", 26: "right_knee",
-    27: "left_ankle", 28: "right_ankle",
-}
-
-PERSON_COLORS = [(0, 0, 255), (0, 255, 0), (255, 0, 0), (0, 255, 255)]
-POSE_CONNECTIONS = mp.solutions.pose.POSE_CONNECTIONS
-
-# ==== ГЛОБАЛЬНОЕ ХРАНИЛИЩЕ ====
-latest_rgb = None
-latest_depth = None
-camera_mode = "none"
-
-smooth_state = {}
-
-# ==== STATE FOR WEB UI ====
-joint_state = {}
-joint_state_lock = threading.Lock()
-live_mappings = []
-mappings_lock = threading.Lock()
-ableton_scanning = False
-
-last_sent = {}  # для threshold проверки
-
-# ==== СГЛАЖИВАНИЕ ====
-def smooth_val(key, raw, alpha):
-    if alpha <= 0:
-        return raw
-    prev = smooth_state.get(key)
-    if prev is None:
-        smooth_state[key] = raw
-        return raw
-    smoothed = prev * alpha + raw * (1 - alpha)
-    smooth_state[key] = smoothed
-    return round(smoothed, 4)
-
-
-def video_callback(dev, data, timestamp):
-    global latest_rgb
-    latest_rgb = cv2.cvtColor(data, cv2.COLOR_RGB2BGR)
-
-
-def depth_callback(dev, data, timestamp):
-    global latest_depth
-    latest_depth = data.copy()
-
-
-def depth_to_display(depth_mm):
-    valid = depth_mm.copy()
-    valid[valid == 0] = DEPTH_MAX_MM
-    clipped = np.clip(valid, DEPTH_MIN_MM, DEPTH_MAX_MM)
-    normalized = ((clipped - DEPTH_MIN_MM) / (DEPTH_MAX_MM - DEPTH_MIN_MM) * 255)
-    normalized = (255 - normalized).astype(np.uint8)
-    return cv2.applyColorMap(normalized, cv2.COLORMAP_JET)
-
-
-def make_silhouette_mask(depth_mm):
-    mask = np.zeros(depth_mm.shape, dtype=np.uint8)
-    in_range = (depth_mm > DEPTH_MIN_MM) & (depth_mm < DEPTH_MAX_MM)
-    mask[in_range] = 255
-    kernel = np.ones((5, 5), np.uint8)
-    mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel)
-    mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel)
-    return mask
-
-
-# ==== SELFIE SEGMENTATION (webcam fallback маска) ====
-segmenter = None
-segmenter_init_tried = False
-
-
-def init_segmenter():
-    """Ленивая инициализация — только когда реально нужна (webcam без depth)."""
-    global segmenter, segmenter_init_tried
-    if segmenter_init_tried:
-        return segmenter
-    segmenter_init_tried = True
-    try:
-        seg_opts = vision.ImageSegmenterOptions(
-            base_options=mp_python.BaseOptions(model_asset_path=SELFIE_MODEL_PATH),
-            running_mode=vision.RunningMode.VIDEO,
-            output_confidence_masks=True,
-        )
-        segmenter = vision.ImageSegmenter.create_from_options(seg_opts)
-        print("Selfie segmentation: загружена (webcam fallback маска)")
-    except Exception as e:
-        print(f"Selfie segmentation: не удалось загрузить ({e}) — "
-              f"используется pose-полигон")
-    return segmenter
-
-
-def make_selfie_mask(h, w, mp_image, timestamp_ms):
-    """Пиксельная сегментация человека из RGB. Возвращает None если модель недоступна."""
-    seg = init_segmenter()
-    if seg is None:
-        return None
-    try:
-        result = seg.segment_for_video(mp_image, timestamp_ms)
-        if not result.confidence_masks:
-            return None
-        conf = result.confidence_masks[0].numpy_view()   # (H, W) float 0..1
-        binary = (conf > SELFIE_THRESHOLD).astype(np.uint8) * 255
-        if binary.shape != (h, w):
-            binary = cv2.resize(binary, (w, h), interpolation=cv2.INTER_NEAREST)
-        kernel = np.ones((5, 5), np.uint8)
-        binary = cv2.morphologyEx(binary, cv2.MORPH_OPEN, kernel)
-        binary = cv2.morphologyEx(binary, cv2.MORPH_CLOSE, kernel)
-        return binary
-    except Exception:
-        return None
-
-
-# Правильный порядок обхода тела для человекообразного контура
-# (не z-order MediaPipe — тот даёт спайки между конечностями)
-BODY_OUTLINE_ORDER = [
-    0,   # nose
-    11,  # left_shoulder
-    13,  # left_elbow
-    15,  # left_wrist
-    16,  # right_wrist
-    14,  # right_elbow
-    12,  # right_shoulder
-    24,  # right_hip
-    26,  # right_knee
-    28,  # right_ankle
-    27,  # left_ankle
-    25,  # left_knee
-    23,  # left_hip
-]
-
-
-def make_pose_mask(h, w, pose_results):
-    mask = np.zeros((h, w), dtype=np.uint8)
-    if not pose_results or not pose_results.pose_landmarks:
-        return mask
-    for landmarks in pose_results.pose_landmarks:
-        pts = {}
-        for idx, lm in enumerate(landmarks):
-            pts[idx] = (int((1.0 - lm.x) * w), int(lm.y * h))
-        contour = [pts[i] for i in BODY_OUTLINE_ORDER if i in pts]
-        if len(contour) < 3:
-            continue
-        body = np.array(contour, dtype=np.int32)
-        cv2.fillPoly(mask, [body], 255)
-        # скелет поверх: тонкие линии, чтобы руки не слипались в один ком
-        for a, b in POSE_CONNECTIONS:
-            if a in pts and b in pts:
-                cv2.line(mask, pts[a], pts[b], 255, 2)
-    kernel = np.ones((5, 5), np.uint8)
-    mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel)
-    return mask
-
-
-def draw_person_skeleton(frame, landmarks, color, joint_names=None, show_coords=False):
-    h, w = frame.shape[:2]
-    pts = [(int((1.0 - lm.x) * w), int(lm.y * h)) for lm in landmarks]
-    for a, b in POSE_CONNECTIONS:
-        if a < len(pts) and b < len(pts):
-            cv2.line(frame, pts[a], pts[b], color, 2)
-    for p in pts:
-        cv2.circle(frame, p, 4, color, -1)
-    if show_coords and joint_names:
-        for lm_idx, name in joint_names.items():
-            lm = landmarks[lm_idx]
-            x, y = pts[lm_idx]
-            label = f"{name} ({lm.x:.2f},{lm.y:.2f},{lm.z:.2f})"
-            cv2.putText(frame, label, (x + 6, y - 6), cv2.FONT_HERSHEY_SIMPLEX, 0.35, color, 1, cv2.LINE_AA)
-
-
+# ==== ВВОД (startup) ====
 def ask_num_poses():
     while True:
         raw = input("Сколько человек в кадре трекать? (1-4): ").strip()
@@ -445,842 +54,238 @@ def ask_initial_tilt():
         return 0
 
 
-# ==== PROFILES ====
-current_profile = CURRENT_PROFILE
+def main():
+    NUM_POSES = ask_num_poses()
+    current_tilt = ask_initial_tilt()
+    state.runtime["num_poses"] = NUM_POSES
+    state.runtime["tilt"] = current_tilt
 
+    # хук: после сохранения/смены профиля — сразу ре-валидация guard'а
+    profiles.on_changed = lambda: ableton_mod.ableton_guard.validate(force=True)
 
-def ensure_profiles_dir():
-    os.makedirs(PROFILES_DIR, exist_ok=True)
+    # ---- OSC клиенты ----
+    osc = osc_mod.OscOutput()
 
+    ableton_client = (
+        udp_client.SimpleUDPClient(config.ABLETON_OSC_IP, config.ABLETON_OSC_PORT)
+        if config.SEND_TO_ABLETON else None
+    )
+    if ableton_client is not None:
+        ableton_client._sock.setblocking(False)
 
-def profile_path(name):
-    return os.path.join(PROFILES_DIR, f"{name}.json")
+    # ---- маппинги + валидация ----
+    profiles.load_mappings()
+    ableton_mod.ableton_guard.validate(force=True)
+    if ableton_mod.ableton_guard.invalid_mappings:
+        print(f"[AbletonGuard] Маппинги с битыми индексами (не будут слаться): "
+              f"{sorted(ableton_mod.ableton_guard.invalid_mappings)}")
 
+    # ---- MediaPipe pose ----
+    pose_tracker = pose_mod.PoseTracker(NUM_POSES)
 
-def list_profiles():
-    ensure_profiles_dir()
-    names = []
-    for f in sorted(os.listdir(PROFILES_DIR)):
-        if f.endswith(".json"):
-            names.append(f[:-5])
-    return names
+    # ---- Web UI (отдельный поток) ----
+    import threading
+    threading.Thread(target=webui.start_web_server, daemon=True).start()
 
+    # ---- камера ----
+    source = camera_mod.create_camera(config.CAMERA_SOURCE, current_tilt)
+    camera_mode = state.camera_mode
 
-def load_mappings():
-    global live_mappings, current_profile
-    ensure_profiles_dir()
-    # try current profile first
-    path = profile_path(current_profile)
-    if os.path.exists(path):
-        with open(path) as f:
-            data = json.load(f)
-        with mappings_lock:
-            live_mappings = data
-        print(f"Profile '{current_profile}': {len(data)} mappings")
-        return data
-    # fallback: migrate from legacy mappings.json
-    if os.path.exists(MAPPINGS_PATH):
-        with open(MAPPINGS_PATH) as f:
-            data = json.load(f)
-        with open(path, "w") as f:
-            json.dump(data, f, indent=2)
-        with mappings_lock:
-            live_mappings = data
-        print(f"Migrated mappings.json -> profiles/{current_profile}.json")
-        return data
-    # create default
-    default = [
-        {"id": 1, "joint": "right_wrist", "axis": "y", "track": 4, "device": 0, "param": 144, "smoothing": 0.8, "threshold": 0.005},
-        {"id": 2, "joint": "left_wrist", "axis": "y", "track": 4, "device": 0, "param": 148, "smoothing": 0.8, "threshold": 0.005},
-    ]
-    with open(path, "w") as f:
-        json.dump(default, f, indent=2)
-    with mappings_lock:
-        live_mappings = default
-    print(f"Created default profile: {len(default)} mappings")
-    return default
+    # ---- окна превью ----
+    panel.create_preview_window()
+    if source.has_depth:
+        cv2.namedWindow("Depth / IR")
+        cv2.moveWindow("Depth / IR", 720, 50)
+    panel.setup_mouse()
 
+    print(f"Камера: {camera_mode.upper()}")
+    print("TAB = панель управления, Q = выход")
+    print(f"AbletonOSC: маппинг на :{config.ABLETON_OSC_PORT} (редактируй в Web UI)")
+    if config.SMOOTHING_ALPHA > 0:
+        print(f"Сглаживание: alpha={config.SMOOTHING_ALPHA}")
 
-def save_mappings(data):
-    with mappings_lock:
-        live_mappings = data
-    path = profile_path(current_profile)
-    with open(path, "w") as f:
-        json.dump(data, f, indent=2)
-    print(f"Saved profile '{current_profile}': {len(data)} mappings")
-    # сразу ре-валидируем guard, чтобы новые маппинги применялись без переключения профиля
+    # ---- Syphon ----
+    syphon_out = syphon_mod.SyphonOutput()
+
+    start_time = time.time()
+    frame_counter = 0
+    fps_counter = 0
+    fps_timer = time.time()
+    current_fps = 0
+
+    prev_people_present = -1
+    prev_gesture_state = {}
+
     try:
-        ableton_guard.validate(force=True)
-    except Exception:
-        pass
-
-
-def load_profile(name):
-    global live_mappings, current_profile
-    path = profile_path(name)
-    if not os.path.exists(path):
-        return None
-    with open(path) as f:
-        data = json.load(f)
-    with mappings_lock:
-        live_mappings = data
-    current_profile = name
-    print(f"Switched to profile '{name}': {len(data)} mappings")
-    try:
-        ableton_guard.validate(force=True)
-    except Exception:
-        pass
-    return data
-
-
-def save_as_profile(name, data):
-    path = profile_path(name)
-    with open(path, "w") as f:
-        json.dump(data, f, indent=2)
-    print(f"Saved as profile '{name}': {len(data)} mappings")
-
-
-def delete_profile(name):
-    if name == CURRENT_PROFILE:
-        return False
-    path = profile_path(name)
-    if os.path.exists(path):
-        os.remove(path)
-        return True
-    return False
-
-
-# ==== ABLETON SCANNER ====
-ableton_socket_lock = threading.Lock()   # сериализация доступа к порту 11001
-
-
-def ableton_query(address, *args, timeout=4):
-    with ableton_socket_lock:
-        listener = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        listener.bind(("0.0.0.0", 11001))
-        listener.settimeout(0.01)
-        for _ in range(500):
-            try:
-                listener.recvfrom(65535)
-            except socket.timeout:
+        while True:
+            frame = source.read()
+            if frame is None:
+                print("Камера потеряна")
                 break
+            frame_bgr = frame.frame_bgr
+            display_frame = frame.display_frame
+            depth_mm = frame.depth_mm
 
-        sender = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        try:
-            builder = OscMessageBuilder(address)
-            for a in args:
-                if isinstance(a, int):
-                    builder.add_arg(a, "i")
-                elif isinstance(a, float):
-                    builder.add_arg(a, "f")
+            # маска глубины на превью
+            if depth_mm is not None:
+                display_frame = cv2.bitwise_and(
+                    display_frame, display_frame,
+                    mask=mask_mod.make_silhouette_mask(depth_mm)
+                )
+
+            rgb = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
+            mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb)
+            timestamp_ms = int((time.time() - start_time) * 1000)
+
+            result = pose_tracker.detect(mp_image, timestamp_ms)
+
+            people_present = 0
+            frame_counter += 1
+            fps_counter += 1
+
+            now = time.time()
+            if now - fps_timer >= 1.0:
+                current_fps = fps_counter
+                fps_counter = 0
+                fps_timer = now
+                osc.send("/fps", current_fps)
+
+            # Ableton guard: периодическая валидация + пик ошибок
+            if ableton_client is not None:
+                ableton_mod.ableton_guard.validate()
+                if frame_counter % 15 == 0:
+                    ableton_mod.ableton_guard.peek_errors()
+
+            should_print = (
+                config.PRINT_COORDS_TO_CONSOLE
+                and frame_counter % config.CONSOLE_PRINT_EVERY_N_FRAMES == 0
+            )
+
+            # joint_state для Web UI
+            with state.joint_state_lock:
+                state.joint_state.clear()
+
+            if result.pose_landmarks:
+                people_present = len(result.pose_landmarks)
+
+                for person_idx, landmarks in enumerate(result.pose_landmarks):
+                    color = config.PERSON_COLORS[person_idx % len(config.PERSON_COLORS)]
+
+                    for lm_idx, name in config.LANDMARK_NAMES.items():
+                        lm = landmarks[lm_idx]
+
+                        a = config.SMOOTHING_ALPHA
+                        x = state.smooth_val(f"p{person_idx}_{name}_x", round(lm.x, 4), a)
+                        y = state.smooth_val(f"p{person_idx}_{name}_y", round(lm.y, 4), a)
+                        z = state.smooth_val(f"p{person_idx}_{name}_z", round(lm.z, 4), a)
+                        visibility = state.smooth_val(
+                            f"p{person_idx}_{name}_vis",
+                            round(getattr(lm, "visibility", 1.0), 4), a)
+
+                        with state.joint_state_lock:
+                            state.joint_state[name] = {"x": x, "y": y, "z": z, "vis": visibility}
+
+                        osc.send(f"/pose/{person_idx}/{name}", [x, y, z, visibility])
+
+                        # Ableton маппинг
+                        if person_idx == 0:
+                            ableton_mod.apply_mapping(ableton_client, name, x, y, z, visibility)
+
+                        if state.runtime["send_osc_flat"]:
+                            base = f"/pose/{person_idx}/{name}"
+                            osc.send(f"{base}/x", x)
+                            osc.send(f"{base}/y", y)
+                            osc.send(f"{base}/z", z)
+                            osc.send(f"{base}/vis", visibility)
+
+                        if should_print:
+                            print(f"person {person_idx} | {name:>14}: x={x:.3f} y={y:.3f} z={z:.3f}")
+
+                    # жесты (только 0-й человек)
+                    pose_tracker.check_gestures(person_idx, landmarks, osc)
+
+                    if config.SHOW_PREVIEW:
+                        pose_mod.draw_person_skeleton(
+                            display_frame, landmarks, color,
+                            joint_names=config.LANDMARK_NAMES,
+                            show_coords=state.runtime["show_coords"]
+                        )
+
+            if prev_people_present != people_present:
+                osc.send("/pose/presence", people_present)
+                prev_people_present = people_present
+
+            osc.send("/pose/count", people_present)
+
+            h, w = display_frame.shape[:2]
+
+            # ---- ленивые стрим-кадры (один раз за кадр) ----
+            stream_cache = {}
+
+            def get_stream_frame(sid):
+                if sid in stream_cache:
+                    return stream_cache[sid]
+                if sid == "skeleton":
+                    out = display_frame
+                elif sid == "rgb":
+                    out = cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR)
+                elif sid == "depth":
+                    out = cv2.resize(mask_mod.depth_to_display(depth_mm), (w, h)) \
+                        if depth_mm is not None else \
+                        __import__("numpy").zeros((h, w, 3), dtype=__import__("numpy").uint8)
+                elif sid == "ir":
+                    if depth_mm is not None:
+                        ir = (depth_mm / 16).clip(0, 255).astype("uint8")
+                        out = cv2.cvtColor(ir, cv2.COLOR_GRAY2BGR)
+                    else:
+                        out = __import__("numpy").zeros((h, w, 3), dtype=__import__("numpy").uint8)
+                elif sid == "mask":
+                    m = mask_mod.best_mask(h, w, depth_mm, mp_image, timestamp_ms, result)
+                    out = cv2.cvtColor(m, cv2.COLOR_GRAY2BGR)
                 else:
-                    builder.add_arg(str(a), "s")
-            sender.sendto(builder.build().dgram, (ABLETON_OSC_IP, ABLETON_OSC_PORT))
-            deadline = time.time() + timeout
-            while time.time() < deadline:
-                listener.settimeout(max(0.01, deadline - time.time()))
-                try:
-                    data, _ = listener.recvfrom(65535)
-                    parsed = osc_message.OscMessage(data)
-                    if parsed.address != "/live/error" and parsed.address != "/live/startup":
-                        return parsed
-                except socket.timeout:
-                    return None
-            return None
-        finally:
-            sender.close()
-            listener.close()
+                    out = display_frame
+                stream_cache[sid] = out
+                return out
 
+            # ---- локальное превью: копия + UI (не уходит наружу) ----
+            if config.SHOW_PREVIEW:
+                preview_sid = state.runtime.get("preview_tab_stream", "skeleton")
+                preview_frame = get_stream_frame(preview_sid).copy()
+                panel.draw_control_panel(preview_frame, state.runtime, h, w)
+                cv2.putText(preview_frame, f"FPS: {current_fps}", (10, 30),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2, cv2.LINE_AA)
+                cv2.putText(preview_frame, f"People: {people_present}", (10, 55),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2, cv2.LINE_AA)
+                cv2.imshow("Kinekt360 — [TAB] Panel  [Q] Quit", preview_frame)
 
-def scan_ableton():
-    global ableton_scanning
-    ableton_scanning = True
-    time.sleep(0.1)
-    try:
-        r = ableton_query("/live/song/get/num_tracks")
-        num_tracks = int(r.params[-1]) if r else 0
-        r = ableton_query("/live/song/get/track_data", 0, num_tracks, "track.name")
-        track_names = list(r.params) if r else []
+            if depth_mm is not None:
+                cv2.imshow("Depth / IR", mask_mod.depth_to_display(depth_mm))
 
-        tracks = []
-        for t in range(num_tracks):
-            name = str(track_names[t]) if t < len(track_names) else f"Track {t}"
-            tr = {"index": t, "name": name, "devices": []}
+            # ---- Syphon: всегда чистые данные ----
+            for sid in syphon_out.servers:
+                if state.runtime.get(f"stream_{sid}", False):
+                    syphon_out.publish(sid, get_stream_frame(sid))
 
-            r = ableton_query("/live/track/get/num_devices", t)
-            num_devices = int(r.params[-1]) if r else 0
-
-            for d in range(num_devices):
-                r = ableton_query("/live/track/get/devices/name", t, d)
-                dname = str(r.params[-1]) if r else f"Device {d}"
-                dev = {"index": d, "name": dname, "parameters": []}
-
-                r = ableton_query("/live/device/get/parameters/name", t, d)
-                names = list(r.params[2:]) if r and len(r.params) > 2 else []
-                r = ableton_query("/live/device/get/parameters/min", t, d)
-                mins = list(r.params[2:]) if r and len(r.params) > 2 else []
-                r = ableton_query("/live/device/get/parameters/max", t, d)
-                maxs = list(r.params[2:]) if r and len(r.params) > 2 else []
-
-                for i, pname in enumerate(names):
-                    dev["parameters"].append({
-                        "index": i, "name": str(pname),
-                        "min": float(mins[i]) if i < len(mins) else 0.0,
-                        "max": float(maxs[i]) if i < len(maxs) else 1.0,
-                    })
-
-                tr["devices"].append(dev)
-            tracks.append(tr)
-
-        return {"tracks": tracks, "total": num_tracks}
-    except Exception as e:
-        return {"error": str(e)}
+            key = cv2.waitKey(1) & 0xFF
+            if key == ord("q"):
+                break
+            elif key == ord("\t") or key == 9:
+                state.runtime["panel_open"] = not state.runtime["panel_open"]
+            elif key == 81 or key == 2424832:  # left arrow
+                state.runtime["preview_tab"] = max(0, state.runtime["preview_tab"] - 1)
+            elif key == 83 or key == 2555904:  # right arrow
+                state.runtime["preview_tab"] = min(2, state.runtime["preview_tab"] + 1)
+            elif camera_mode == "kinect":
+                tilt = state.runtime["tilt"]
+                if tilt != current_tilt:
+                    current_tilt = max(-30, min(30, tilt))
+                    source.set_tilt(current_tilt)
     finally:
-        ableton_scanning = False
+        pose_tracker.close()
+        cv2.destroyAllWindows()
+        syphon_out.stop_all()
+        source.close()
 
 
-# ==== ABLETON GUARD (защита от переспама) ====
-class AbletonGuard:
-    def __init__(self):
-        self.valid_targets = set()       # {(track, device, param)}
-        self.last_validate = 0.0
-        self.validate_interval = 30.0    # пере-валидация каждые 30 сек
-        self.last_sent = {}              # mapping_id -> timestamp
-        self.min_interval = 0.05         # 50ms между отправками одного маппинга
-        self.msg_times = []              # времена последних отправок (rate limit)
-        self.max_msg_per_sec = 60
-        self.backoff_until = 0.0
-        self.backoff_seconds = 5.0
-        self.status = "unknown"          # unknown | ok | backoff | live_offline
-        self.invalid_mappings = set()    # id маппингов с битыми индексами
-
-    def validate(self, force=False):
-        """Лёгкий скан структуры Ableton: собираем валидные (track, device, param)."""
-        now = time.time()
-        if not force and now - self.last_validate < self.validate_interval:
-            return
-        self.last_validate = now
-
-        try:
-            r = ableton_query("/live/song/get/num_tracks", timeout=2)
-            # Ableton не ответил — НЕ затираем старые targets, иначе все маппинги
-            # станут invalid до следующей удачной валидации (баг "надо переключить профиль")
-            if r is None:
-                self.status = "live_offline"
-                return
-
-            num_tracks = int(r.params[-1])
-            targets = set()
-            for t in range(num_tracks):
-                r = ableton_query("/live/track/get/num_devices", t, timeout=2)
-                num_dev = int(r.params[-1]) if r else 0
-                for d in range(num_dev):
-                    r = ableton_query("/live/device/get/num_parameters", t, d, timeout=2)
-                    num_p = int(r.params[-1]) if r else 0
-                    for p in range(num_p):
-                        targets.add((t, d, p))
-            self.valid_targets = targets
-            self.status = "ok"
-        except Exception:
-            self.status = "live_offline"
-
-        # обновляем список битых маппингов
-        with mappings_lock:
-            self.invalid_mappings = {
-                m["id"] for m in live_mappings
-                if (m.get("track", 0), m.get("device", 0), m.get("param", 0)) not in self.valid_targets
-            }
-
-    def can_send(self, m):
-        """Проверка 3 слоёв: backoff, rate limit, валидность."""
-        now = time.time()
-
-        # слой 3: глобальный backoff после ошибки
-        if now < self.backoff_until:
-            return False
-
-        # слой 1: структурная валидация
-        if (m.get("track", 0), m.get("device", 0), m.get("param", 0)) not in self.valid_targets:
-            return False
-
-        # слой 2: per-mapping rate limit
-        last = self.last_sent.get(m.get("id"))
-        if last is not None and now - last < self.min_interval:
-            return False
-
-        # слой 2: общий rate limit
-        self.msg_times = [t for t in self.msg_times if now - t < 1.0]
-        if len(self.msg_times) >= self.max_msg_per_sec:
-            return False
-
-        return True
-
-    def mark_sent(self, m):
-        now = time.time()
-        self.last_sent[m.get("id")] = now
-        self.msg_times.append(now)
-
-    def peek_errors(self):
-        """Неблокирующий пик на 11001: /live/error после НАШИХ отправок → backoff."""
-        if self.backoff_until > time.time():
-            return
-        now = time.time()
-        # backoff только если мы сами недавно слали — иначе это чужие ошибки (старый мусор)
-        if not self.msg_times or now - self.msg_times[-1] > 0.5:
-            return
-        with ableton_socket_lock:
-            try:
-                s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-                s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-                s.bind(("0.0.0.0", 11001))
-                s.setblocking(False)
-                try:
-                    # дренируем ВЕСЬ буфер: если наткнулись на ошибку — ставим backoff,
-                    # но продолжаем вычитывать остаток, чтобы старый мусор
-                    # не ретриггерил backoff каждые 5 секунд
-                    while True:
-                        data, _ = s.recvfrom(65535)
-                        parsed = osc_message.OscMessage(data)
-                        if parsed.address == "/live/error":
-                            self.backoff_until = time.time() + self.backoff_seconds
-                            self.status = "backoff"
-                            print(f"[AbletonGuard] Ошибка AbletonOSC, пауза {self.backoff_seconds}с")
-                except (BlockingIOError, socket.timeout):
-                    pass
-                finally:
-                    s.close()
-            except Exception:
-                pass
-
-    def status_dict(self):
-        return {
-            "status": self.status,
-            "valid_targets": len(self.valid_targets),
-            "invalid_mappings": sorted(self.invalid_mappings),
-            "backoff_until": self.backoff_until,
-            "msg_per_sec_limit": self.max_msg_per_sec,
-        }
-
-
-ableton_guard = AbletonGuard()
-
-
-# ==== WEB SERVER ====
-def web_server():
-    class Handler(BaseHTTPRequestHandler):
-        def log_message(self, *a):
-            pass
-
-        def do_GET(self):
-            parsed = urlparse(self.path)
-            path = parsed.path
-
-            if path == "/api/joints":
-                with joint_state_lock:
-                    data = dict(joint_state)
-                self.send_json(data)
-
-            elif path == "/api/mappings":
-                with mappings_lock:
-                    self.send_json(live_mappings)
-
-            elif path == "/api/profiles":
-                self.send_json(list_profiles())
-
-            elif path == "/api/profiles/current":
-                with mappings_lock:
-                    self.send_json({"name": current_profile, "mappings": live_mappings})
-
-            elif path == "/api/ableton/scan":
-                ableton_guard.validate(force=True)
-                self.send_json(scan_ableton())
-
-            elif path == "/api/ableton/status":
-                self.send_json(ableton_guard.status_dict())
-
-            elif path == "/":
-                self.send_response(200)
-                self.send_header("Content-Type", "text/html; charset=utf-8")
-                self.end_headers()
-                try:
-                    with open("web/index.html") as f:
-                        self.wfile.write(f.read().encode())
-                except FileNotFoundError:
-                    self.wfile.write(b"<h1>web/index.html not found</h1>")
-
-            else:
-                self.send_json({"error": "not found"}, 404)
-
-        def do_PUT(self):
-            length = int(self.headers.get("Content-Length", 0))
-            body = self.rfile.read(length)
-            try:
-                data = json.loads(body)
-            except Exception:
-                self.send_json({"error": "bad json"}, 400)
-                return
-
-            if self.path == "/api/mappings":
-                save_mappings(data)
-                self.send_json({"ok": True})
-
-            elif self.path == "/api/profiles/load":
-                name = data.get("name")
-                if not name:
-                    self.send_json({"error": "name required"}, 400)
-                elif load_profile(name) is None:
-                    self.send_json({"error": f"profile '{name}' not found"}, 404)
-                else:
-                    self.send_json({"ok": True, "name": name})
-
-            elif self.path == "/api/profiles/save":
-                name = data.get("name")
-                mappings = data.get("mappings")
-                if not name or mappings is None:
-                    self.send_json({"error": "name and mappings required"}, 400)
-                save_as_profile(name, mappings)
-                self.send_json({"ok": True, "name": name})
-
-            else:
-                self.send_json({"error": "not found"}, 404)
-
-        def do_DELETE(self):
-            import urllib.parse as up
-            parsed = up.urlparse(self.path)
-            if parsed.path == "/api/profiles":
-                query = parse_qs(parsed.query)
-                name = query.get("name", [None])[0]
-                if not name:
-                    self.send_json({"error": "name required"}, 400)
-                elif delete_profile(name):
-                    self.send_json({"ok": True})
-                else:
-                    self.send_json({"error": f"cannot delete '{name}'"}, 400)
-            else:
-                self.send_json({"error": "not found"}, 404)
-
-        def send_json(self, data, code=200):
-            self.send_response(code)
-            self.send_header("Content-Type", "application/json")
-            self.send_header("Access-Control-Allow-Origin", "*")
-            self.end_headers()
-            self.wfile.write(json.dumps(data).encode())
-
-    server = HTTPServer((WEB_HOST, WEB_PORT), Handler)
-    print(f"Web UI: http://localhost:{WEB_PORT}")
-    server.serve_forever()
-
-
-web_thread = threading.Thread(target=web_server, daemon=True)
-web_thread.start()
-
-
-# ==== ИНИЦИАЛИЗАЦИЯ ====
-NUM_POSES = ask_num_poses()
-current_tilt = ask_initial_tilt()
-runtime["num_poses"] = NUM_POSES
-runtime["tilt"] = current_tilt
-
-client = udp_client.SimpleUDPClient(OSC_IP, OSC_PORT)
-monitor_client = udp_client.SimpleUDPClient(MONITOR_OSC_IP, MONITOR_OSC_PORT) if SEND_TO_MONITOR else None
-ableton_client = udp_client.SimpleUDPClient(ABLETON_OSC_IP, ABLETON_OSC_PORT) if SEND_TO_ABLETON else None
-
-client._sock.setblocking(False)
-if monitor_client is not None:
-    monitor_client._sock.setblocking(False)
-if ableton_client is not None:
-    ableton_client._sock.setblocking(False)
-
-
-def send_osc(address, value):
-    try:
-        client.send_message(address, value)
-    except (BlockingIOError, OSError):
-        pass
-    if monitor_client is not None:
-        try:
-            monitor_client.send_message(address, value)
-        except (BlockingIOError, OSError):
-            pass
-
-
-load_mappings()
-
-# стартовая валидация Ableton структуры (guard)
-ableton_guard.validate(force=True)
-if ableton_guard.invalid_mappings:
-    print(f"[AbletonGuard] Маппинги с битыми индексами (не будут слаться): "
-          f"{sorted(ableton_guard.invalid_mappings)}")
-base_options = mp_python.BaseOptions(model_asset_path=MODEL_PATH)
-options = vision.PoseLandmarkerOptions(
-    base_options=base_options,
-    running_mode=vision.RunningMode.VIDEO,
-    num_poses=NUM_POSES,
-    min_pose_detection_confidence=0.5,
-    min_pose_presence_confidence=0.5,
-    min_tracking_confidence=0.5,
-)
-landmarker = vision.PoseLandmarker.create_from_options(options)
-
-# ==== ОТКРЫВАЕМ КАМЕРУ ====
-ctx = None
-dev = None
-webcam = None
-has_depth = True
-
-
-def init_kinect():
-    global ctx, dev, has_depth
-    try:
-        ctx = freenect.init()
-        if not ctx:
-            return False
-        dev = freenect.open_device(ctx, 0)
-        if not dev:
-            freenect.shutdown(ctx)
-            ctx = None
-            return False
-        freenect.set_video_mode(dev, freenect.RESOLUTION_MEDIUM, freenect.VIDEO_RGB)
-        freenect.set_depth_mode(dev, freenect.RESOLUTION_MEDIUM, freenect.DEPTH_MM)
-        freenect.set_video_callback(dev, video_callback)
-        freenect.set_depth_callback(dev, depth_callback)
-        freenect.set_tilt_degs(dev, current_tilt)
-        print(f"Tilt выставлен: {current_tilt}°")
-        freenect.start_video(dev)
-        freenect.start_depth(dev)
-        return True
-    except Exception as e:
-        print(f"Kinect init error: {e}")
-        if ctx:
-            freenect.shutdown(ctx)
-            ctx = None
-        return False
-
-
-def init_webcam():
-    global webcam, has_depth
-    cap = cv2.VideoCapture(0)
-    if not cap.isOpened():
-        return False
-    cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
-    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
-    cap.set(cv2.CAP_PROP_FPS, 30)
-    webcam = cap
-    has_depth = False
-    return True
-
-
-if CAMERA_SOURCE == "kinect" or CAMERA_SOURCE == "auto":
-    if init_kinect():
-        camera_mode = "kinect"
-    elif CAMERA_SOURCE == "kinect":
-        raise RuntimeError("Kinect не найден, а CAMERA_SOURCE=kinect")
-
-if camera_mode != "kinect":
-    if init_webcam():
-        camera_mode = "webcam"
-        print("Режим: webcam (MacBook камера) — без depth/тилта")
-    else:
-        raise RuntimeError("Не удалось открыть ни Kinect, ни вебку")
-
-if SHOW_PREVIEW:
-    cv2.namedWindow("Kinekt360 — [TAB] Panel  [Q] Quit")
-    cv2.moveWindow("Kinekt360 — [TAB] Panel  [Q] Quit", 50, 50)
-
-
-def mouse_callback(event, x, y, flags, param):
-    if event == cv2.EVENT_LBUTTONDOWN:
-        runtime["mouse_down"] = True
-        handle_click(runtime, "click", x, y)
-    elif event == cv2.EVENT_MOUSEMOVE and runtime.get("mouse_down"):
-        for k, v in list(runtime.items()):
-            if not k.startswith("_rect_"):
-                continue
-            var_name = k.replace("_rect_", "")
-            if var_name in ("tilt",):
-                rx, ry, rw, rh = v
-                if rx <= x <= rx + rw and ry <= y <= ry + rh:
-                    pct = max(0, min(1, (x - rx) / rw))
-                    runtime[var_name] = round(-30 + pct * 60)
-    elif event == cv2.EVENT_LBUTTONUP:
-        runtime["mouse_down"] = False
-
-
-cv2.setMouseCallback("Kinekt360 — [TAB] Panel  [Q] Quit", mouse_callback)
-if has_depth:
-    cv2.namedWindow("Depth / IR")
-    cv2.moveWindow("Depth / IR", 720, 50)
-
-print(f"Камера: {camera_mode.upper()}")
-print("TAB = панель управления, Q = выход")
-print(f"AbletonOSC: маппинг на :{ABLETON_OSC_PORT} (редактируй в Web UI)")
-if SMOOTHING_ALPHA > 0:
-    print(f"Сглаживание: alpha={SMOOTHING_ALPHA}")
-
-syphon_servers = {}
-syphon_textures = {}
-if SEND_SYPHON:
-    if not SYPHON_AVAILABLE:
-        print("syphon-python не установлен -- Syphon-вывод отключён")
-    else:
-        for sid, sinfo in SYPHON_STREAMS.items():
-            try:
-                sv = syphon.SyphonMetalServer(sinfo["name"])
-                syphon_servers[sid] = sv
-                syphon_textures[sid] = None
-                print(f"  Syphon: {sinfo['name']}")
-            except Exception as e:
-                print(f"  Syphon {sinfo['name']} error: {e}")
-
-start_time = time.time()
-frame_counter = 0
-fps_counter = 0
-fps_timer = time.time()
-current_fps = 0
-
-prev_people_present = -1
-prev_gesture_state = {}
-
-try:
-    while True:
-        if camera_mode == "kinect":
-            freenect.process_events(ctx)
-            if latest_rgb is None or latest_depth is None:
-                continue
-            frame_bgr = latest_rgb
-            depth_mm_raw = cv2.flip(latest_depth, 1)
-            display_frame = cv2.flip(frame_bgr, 1)
-            if USE_DEPTH_MASK:
-                mask = make_silhouette_mask(depth_mm_raw)
-                display_frame = cv2.bitwise_and(display_frame, display_frame, mask=mask)
-            depth_mm = depth_mm_raw
-        else:
-            ret, frame_bgr = webcam.read()
-            if not ret:
-                print("Вебка потеряна")
-                break
-            display_frame = cv2.flip(frame_bgr, 1)
-            depth_mm = None
-
-        rgb = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
-        mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb)
-        timestamp_ms = int((time.time() - start_time) * 1000)
-
-        result = landmarker.detect_for_video(mp_image, timestamp_ms)
-
-        people_present = 0
-        frame_counter += 1
-        fps_counter += 1
-
-        now = time.time()
-        if now - fps_timer >= 1.0:
-            current_fps = fps_counter
-            fps_counter = 0
-            fps_timer = now
-            send_osc("/fps", current_fps)
-
-        # Ableton guard: периодическая валидация + пик ошибок (раз в ~0.5с)
-        if ableton_client is not None:
-            ableton_guard.validate()
-            if frame_counter % 15 == 0:
-                ableton_guard.peek_errors()
-
-        should_print = (
-            PRINT_COORDS_TO_CONSOLE and frame_counter % CONSOLE_PRINT_EVERY_N_FRAMES == 0
-        )
-
-        # обновляем joint_state для Web UI
-        with joint_state_lock:
-            joint_state.clear()
-
-        if result.pose_landmarks:
-            people_present = len(result.pose_landmarks)
-
-            for person_idx, landmarks in enumerate(result.pose_landmarks):
-                color = PERSON_COLORS[person_idx % len(PERSON_COLORS)]
-
-                for lm_idx, name in LANDMARK_NAMES.items():
-                    lm = landmarks[lm_idx]
-
-                    a = SMOOTHING_ALPHA
-                    x = smooth_val(f"p{person_idx}_{name}_x", round(lm.x, 4), a)
-                    y = smooth_val(f"p{person_idx}_{name}_y", round(lm.y, 4), a)
-                    z = smooth_val(f"p{person_idx}_{name}_z", round(lm.z, 4), a)
-                    visibility = smooth_val(f"p{person_idx}_{name}_vis", round(getattr(lm, "visibility", 1.0), 4), a)
-
-                    # store для Web UI
-                    with joint_state_lock:
-                        joint_state[name] = {"x": x, "y": y, "z": z, "vis": visibility}
-
-                    send_osc(f"/pose/{person_idx}/{name}", [x, y, z, visibility])
-
-                    # Ableton маппинг из JSON
-                    if ableton_client is not None and person_idx == 0 and not ableton_scanning:
-                        with mappings_lock:
-                            for m in live_mappings:
-                                if m["joint"] == name:
-                                    val = {"x": x, "y": y, "z": z, "vis": visibility}.get(m["axis"])
-                                    if val is not None:
-                                        smoothing = m.get("smoothing", SMOOTHING_ALPHA)
-                                        threshold = m.get("threshold", 0)
-                                        skey = f"ableton_{m['id']}"
-                                        sval = smooth_val(skey, val, smoothing)
-                                        # invert
-                                        if m.get("invert", False):
-                                            sval = 1.0 - sval
-                                        # scale/min/max
-                                        scale = m.get("scale", 1.0)
-                                        pmin = m.get("min", 0.0)
-                                        pmax = m.get("max", 1.0)
-                                        if scale != 1.0:
-                                            sval = max(0.0, min(1.0, sval * scale))
-                                        sval = pmin + max(0.0, min(1.0, sval)) * (pmax - pmin)
-                                        last = last_sent.get(skey)
-                                        if threshold and last is not None and abs(sval - last) < threshold:
-                                            pass
-                                        elif ableton_guard.can_send(m):
-                                            last_sent[skey] = sval
-                                            ableton_guard.mark_sent(m)
-                                            ableton_client.send_message(
-                                                "/live/device/set/parameter/value",
-                                                [m["track"], m["device"], m["param"], sval]
-                                            )
-
-                    if runtime["send_osc_flat"]:
-                        base = f"/pose/{person_idx}/{name}"
-                        send_osc(f"{base}/x", x)
-                        send_osc(f"{base}/y", y)
-                        send_osc(f"{base}/z", z)
-                        send_osc(f"{base}/vis", visibility)
-
-                    if should_print:
-                        print(f"person {person_idx} | {name:>14}: x={x:.3f} y={y:.3f} z={z:.3f}")
-
-                if person_idx == 0 and runtime["send_gestures"]:
-                    wrist = landmarks[16]
-                    shoulder = landmarks[12]
-                    hip = landmarks[24]
-
-                    right_hand_up = 1.0 if wrist.y < shoulder.y else 0.0
-                    right_hand_down = 1.0 if wrist.y > hip.y else 0.0
-
-                    gkey = "p0_right_hand_up"
-                    if prev_gesture_state.get(gkey) != right_hand_up:
-                        send_osc("/gesture/0/right_hand_up", right_hand_up)
-                        prev_gesture_state[gkey] = right_hand_up
-
-                    gkey = "p0_right_hand_down"
-                    if prev_gesture_state.get(gkey) != right_hand_down:
-                        send_osc("/gesture/0/right_hand_down", right_hand_down)
-                        prev_gesture_state[gkey] = right_hand_down
-
-                if SHOW_PREVIEW:
-                    draw_person_skeleton(
-                        display_frame, landmarks, color,
-                        joint_names=LANDMARK_NAMES, show_coords=runtime["show_coords"]
-                    )
-
-        if prev_people_present != people_present:
-            send_osc("/pose/presence", people_present)
-            prev_people_present = people_present
-
-        send_osc("/pose/count", people_present)
-
-        h, w = display_frame.shape[:2]
-
-        # ---- вычисляем каждый вариант картинки лениво и один раз за кадр ----
-        stream_cache = {}
-
-        def get_stream_frame(sid):
-            if sid in stream_cache:
-                return stream_cache[sid]
-            if sid == "skeleton":
-                out = display_frame
-            elif sid == "rgb":
-                out = cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR)
-            elif sid == "depth":
-                if depth_mm is not None:
-                    out = cv2.resize(depth_to_display(depth_mm), (w, h))
-                else:
-                    out = np.zeros((h, w, 3), dtype=np.uint8)
-            elif sid == "ir":
-                # IR: используем depth как grayscale-заглушку, отдельного IR-потока нет
-                if depth_mm is not None:
-                    ir = np.clip(depth_mm / 16, 0, 255).astype(np.uint8)
-                    out = cv2.cvtColor(ir, cv2.COLOR_GRAY2BGR)
-                else:
-                    out = np.zeros((h, w, 3), dtype=np.uint8)
-            elif sid == "mask":
-                # приоритет: depth → selfie-сегментация → pose-полигон
-                if depth_mm is not None:
-                    m = make_silhouette_mask(depth_mm)
-                else:
-                    m = make_selfie_mask(h, w, mp_image, timestamp_ms)
-                    if m is None or not m.any() and result.pose_landmarks:
-                        m = make_pose_mask(h, w, result)
-                    if m is None:
-                        m = np.zeros((h, w), dtype=np.uint8)
-                out = cv2.cvtColor(m, cv2.COLOR_GRAY2BGR)
-            else:
-                out = display_frame
-            stream_cache[sid] = out
-            return out
-
-        # ---- локальное превью: копия + UI-оверлей, НИКОГДА не уходит наружу ----
-        if SHOW_PREVIEW:
-            preview_sid = runtime.get("preview_tab_stream", "skeleton")
-            preview_frame = get_stream_frame(preview_sid).copy()
-            draw_control_panel(preview_frame, runtime, h, w)
-            cv2.putText(preview_frame, f"FPS: {current_fps}", (10, 30),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2, cv2.LINE_AA)
-            cv2.putText(preview_frame, f"People: {people_present}", (10, 55),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2, cv2.LINE_AA)
-            cv2.imshow("Kinekt360 — [TAB] Panel  [Q] Quit", preview_frame)
-
-        if depth_mm is not None:
-            cv2.imshow("Depth / IR", depth_to_display(depth_mm))
-
-        # ---- публикация в Syphon: всегда чистые данные, без панели/текста ----
-        for sid, sv in syphon_servers.items():
-            if not runtime.get(f"stream_{sid}", False):
-                continue
-            frame_data = get_stream_frame(sid)
-
-            if syphon_textures[sid] is None:
-                syphon_textures[sid] = create_mtl_texture(sv.device, w, h)
-            rgba = cv2.cvtColor(frame_data, cv2.COLOR_BGR2RGBA)
-            copy_image_to_mtl_texture(rgba, syphon_textures[sid])
-            sv.publish_frame_texture(syphon_textures[sid])
-
-        key = cv2.waitKey(1) & 0xFF
-        if key == ord("q"):
-            break
-        elif key == ord("\t") or key == 9:
-            runtime["panel_open"] = not runtime["panel_open"]
-        elif key == 81 or key == 2424832:  # left arrow
-            runtime["preview_tab"] = max(0, runtime["preview_tab"] - 1)
-        elif key == 83 or key == 2555904:  # right arrow
-            runtime["preview_tab"] = min(2, runtime["preview_tab"] + 1)
-        elif camera_mode == "kinect":
-            tilt = runtime["tilt"]
-            if tilt != current_tilt:
-                current_tilt = max(-30, min(30, tilt))
-                freenect.set_tilt_degs(dev, current_tilt)
-finally:
-    landmarker.close()
-    cv2.destroyAllWindows()
-    for sv in syphon_servers.values():
-        try:
-            sv.stop()
-        except:
-            pass
-    if camera_mode == "kinect":
-        if dev:
-            freenect.stop_video(dev)
-            freenect.stop_depth(dev)
-            freenect.close_device(dev)
-        if ctx:
-            freenect.shutdown(ctx)
-    elif webcam is not None:
-        webcam.release()
+if __name__ == "__main__":
+    main()
