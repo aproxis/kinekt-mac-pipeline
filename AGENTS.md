@@ -20,35 +20,40 @@ Kinect Depth ────▶ Depth Processing  ─▶ OSC → Chataigne (:9001) 
 
 Every stage is a standalone module. Stages communicate via queues / shared memory / callbacks — NOT hardcoded function chains.
 
-## Version History
+## Version History (история — git tag `pre-refactor`)
 
-| Script | Key features |
+| Скрипт | Key features |
 |--------|-------------|
-| `pose_to_osc.py` | Sync API (`sync_get_video/depth`), tilt via separate device handle — конфликты USB |
+| `pose_to_osc.py` | Sync API, tilt через отдельный device handle — конфликты USB |
 | `pose_to_osc_2.py` | Retry-механика при ошибках чтения кадра |
-| `pose_to_osc_3.py` | **Callback-based capture**, единый `open_device()` на всё время, тилт без LIBUSB_ERROR_ACCESS |
+| `pose_to_osc_3.py` | **Callback-based capture**, единый `open_device()`, тилт без LIBUSB_ERROR_ACCESS |
 | `pose_to_osc_4.py` | Dual OSC (Resolume + Protokol), **Syphon** video streaming |
-| `pose_to_osc_5.py` | Flat OSC адреса (`/pose/0/nose/x`), non-blocking сокеты |
-| **`pose_to_osc_6.py`** | Smoothing, жесты (`/gesture/0/right_hand_up`), FPS, **webcam fallback** |
-| **`pose_to_osc_7.py`** | Per-mapping smoothing/threshold, profiles system, Web UI (joints → param tree → mappings), manual VST3 param mapping, normalization (min/max), invert, joint grouping |
+| `pose_to_osc_5.py` | Flat OSC адреса, non-blocking сокеты |
+| `pose_to_osc_6.py` | Smoothing, жесты, FPS, **webcam fallback** |
+| `pose_to_osc_7.py` | Per-mapping smoothing/threshold, profiles, Web UI, normalization, invert |
+| `pose_to_osc_8.py` | OpenCV-панель управления поверх превью (Tab) |
+| `pose_to_osc_9.py` | 5 Syphon-стримов, 3-вкладочная панель, AbletonGuard, selfie-маска |
+| **`main.py`** | Модульная архитектура (config/state/profiles/modules) — актуальная |
 
-## Current State (July 2026)
+## Current State (Aug 2026)
 
-- **pose_to_osc_7.py** — текущий рабочий скрипт
+- **`main.py`** — точка входа, тонкая оркестрация (~250 строк)
 - Callback-based захват через `video_callback`/`depth_callback` + `freenect.process_events()`
 - Dual OSC: Resolume на `192.168.1.5:7000` + локальный порт `9001` для Chataigne/Protokol
-- Syphon-сервер `KinectSkeleton` — живое видео с масками и скелетом в Resolume
+- Syphon: 5 стримов — `KinectSkeleton`, `KinectRGB`, `KinectDepth`, `KinectIR`, `KinectMask`
 - Non-blocking сокеты — не крешится при отсутствии Resolume
 - Smoothing координат — экспоненциальный фильтр (SMOOTHING_ALPHA)
 - Жесты — `/gesture/0/right_hand_up`, `/gesture/0/right_hand_down`
 - FPS — счётчик на превью + OSC `/fps`
 - Присутствие — `/pose/presence` при входе/выходе человека из кадра
 - Webcam fallback — если Kinect не подключён, автоматически использует MacBook камеру
-- **Web UI** (`http://localhost:8080`) — live joints, Ableton scanner, mapping editor, profile manager
+- **Web UI** (`http://localhost:8090`) — live joints, Ableton scanner, mapping editor, profile manager
+  (порт 8090 — 8080 занят локальным nginx)
 - **Profiles** — `profiles/*.json`, переключение через dropdown в Web UI
 - **Normalization** — joint 0-1 → реальный диапазон параметра (min/max из Ableton)
 - **Per-mapping** — smoothing, threshold, scale, invert — каждый mapping настраивается отдельно
-- **Manual param** — для VST3 плагинов с ограниченным экспортом параметров (Configure в Live)
+- **AbletonGuard** — защита от переспама: структурная валидация + rate limit + backoff
+- **Selfie Segmentation** — пиксельная маска для webcam (без depth)
 - **Protokol** — мониторинг всех OSC-сообщений в реальном времени
 
 ## Directory Structure
@@ -57,17 +62,31 @@ Every stage is a standalone module. Stages communicate via queues / shared memor
 Kinekt360/
 ├── AGENTS.md                  # this file
 ├── .gitignore
-├── pose_to_osc.py             # v1 — sync API
-├── pose_to_osc_2.py           # v2 — retries
-├── pose_to_osc_3.py           # v3 — callback-based, single handle
-├── pose_to_osc_4.py           # v4 — dual OSC + Syphon
-├── pose_to_osc_5.py           # v5 — flat OSC + non-blocking
-├── pose_to_osc_6.py           # v6 — smoothing, gestures, FPS, webcam
-├── pose_to_osc_7.py           # v7 — per-mapping smoothing, Web UI, profiles, normalization, invert (current)
+├── main.py                    # точка входа (тонкая оркестрация)
+├── config.py                  # статические настройки + PROJECT_ROOT
+├── state.py                   # разделяемое состояние (runtime, locks)
+├── profiles.py                # персистентность профилей маппингов
+├── modules/
+│   ├── input/
+│   │   └── camera.py          # FrameSource: KinectSource / WebcamSource
+│   ├── process/
+│   │   ├── pose.py            # MediaPipe pose, скелет, жесты
+│   │   └── mask.py            # маски: depth / selfie / pose
+│   ├── output/
+│   │   ├── osc.py             # OSC (Resolume + monitor)
+│   │   ├── ableton.py         # AbletonOSC scanner + guard + маппинг
+│   │   ├── syphon.py          # 5 Syphon-стримов
+│   │   └── webui.py           # HTTP Web UI (start_web_server)
+│   └── ui/
+│       └── panel.py           # OpenCV-панель управления
+├── web/
+│   └── index.html             # Web UI фронтенд
+├── profiles/                  # JSON-конфиги маппингов
 ├── pose_landmarker.task       # MediaPipe model (gitignored)
+├── selfie_segmentation.tflite # Selfie segmentation (gitignored)
 ├── freenect-python/           # libfreenect Python bindings
-├── venv/                      # Python virtual environment
-└── modules/                   # (future) modular pipeline
+├── unity-kinekt/              # Unity проект (outline trail эффект)
+└── venv/                      # Python virtual environment
 ```
 
 ## Development Conventions
