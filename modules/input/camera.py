@@ -109,8 +109,8 @@ class KinectSource(FrameSource):
 
 
 class WebcamSource(FrameSource):
-    def __init__(self):
-        self.cap = cv2.VideoCapture(0)
+    def __init__(self, camera_index: int = 0):
+        self.cap = cv2.VideoCapture(camera_index)
         if not self.cap.isOpened():
             raise RuntimeError("Не удалось открыть вебку")
         self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)

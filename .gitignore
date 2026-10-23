@@ -30,3 +30,6 @@ unity-kinekt/UserSettings/
 unity-kinekt/obj/
 unity-kinekt/*.csproj
 unity-kinekt/*.sln
+
+# Review media artifacts (screenshots/video, not source)
+/review/

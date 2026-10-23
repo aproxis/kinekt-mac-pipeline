@@ -46,6 +46,10 @@ ABLETON_OSC_IP = "127.0.0.1"
 ABLETON_OSC_PORT = 11000
 SEND_TO_ABLETON = True
 
+# ==== PLAYCANVAS BRIDGE (дополнительный потребитель, Resolume/monitor не меняются) ====
+SEND_TO_PC_BRIDGE = True
+PC_BRIDGE_OSC_PORT = 9002
+
 # ==== ПРОФИЛИ / WEB ====
 MAPPINGS_PATH = str(PROJECT_ROOT / "mappings.json")   # legacy fallback
 PROFILES_DIR = str(PROJECT_ROOT / "profiles")

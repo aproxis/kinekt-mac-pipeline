@@ -110,6 +110,28 @@ Kinekt360/
 | `syphon-python` | Syphon frame output | ✅ installed |
 | `pyobjc` | macOS bridge for Syphon | ✅ installed |
 
+## PlayCanvas 3D Scene (Psychedelic Particles)
+
+- `playcanvas/psyScene.mjs` — ESM-скрипт (`import { Script } from 'playcanvas'`,
+  атрибуты через `/** @attribute */`): GPU-частицы, светящиеся связи, орбы рук,
+  аудиореактивность, до 4 человек. В PlayCanvas Editor ESM = `.mjs`, classic = `.js`.
+- `playcanvas/demo.html` — автономный запуск без Editor (ESM-движок + import map).
+- Editor-проект: project `1627336`, сцены: **01 — Galaxy** (`2630497`),
+  **02 — Kaleido Veil** (`2630507`), **03 — Hyperspace Tunnel** (`2630508`),
+  **04 — Neon Ribbons** (`2630509`). Переключение — атрибут `variant` у `psyScene.mjs`.
+- `modules/output/pc_bridge.py` — OSC `udp :9002` → WebSocket `ws://127.0.0.1:8091`
+  (JSON 30 Гц). Дополнительный потребитель; Resolume `:7000`, monitor `:9001`,
+  Ableton `:11000/11001` не изменяются (`config.SEND_TO_PC_BRIDGE`).
+- `tools/webcam_pose_feed.py` — headless FaceTime-камера → MediaPipe → те же
+  `/pose/...` адреса (фоллбэк без Kinect). Требует разрешение Camera для терминала.
+
+```bash
+# сцена (демо/мост)
+cd playcanvas && python3 -m http.server 8124     # http://127.0.0.1:8124/demo.html
+./venv/bin/python -m modules.output.pc_bridge    # ws :8091, osc :9002
+./venv/bin/python tools/webcam_pose_feed.py --people 4
+```
+
 ## External Tools
 
 | Tool | Purpose |
