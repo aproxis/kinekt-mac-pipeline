@@ -45,6 +45,9 @@ export class PsyScene extends Script {
 
     /** @attribute */
     cameraMotion = true;
+
+    /** @attribute */
+    minConfidence = 0.5;
 }
 
 // ---------------------------------------------------------------------------
@@ -52,6 +55,7 @@ export class PsyScene extends Script {
 // ---------------------------------------------------------------------------
 var PARTICLE_VS = `
 attribute vec3 aPosition;
+attribute vec3 aTarget;
 attribute vec4 aUv0;
 
 uniform mat4 matrix_viewProjection;
@@ -63,6 +67,16 @@ uniform float uMid;
 uniform float uTreble;
 uniform float uHueSpeed;
 uniform float uOpen;
+uniform float uMorph;
+
+uniform vec4 uVortex0;
+uniform vec4 uVortex1;
+uniform vec4 uVortex2;
+uniform vec4 uVortex3;
+uniform float uVortexT0;
+uniform float uVortexT1;
+uniform float uVortexT2;
+uniform float uVortexT3;
 
 uniform float uSpin0;
 uniform float uSpin1;
@@ -105,21 +119,32 @@ vec3 handPush(vec3 p, vec4 h, float bass, float spin) {
     return p2;
 }
 
+vec3 vortexPush(vec3 p, vec4 v, float birth, float t) {
+    if (v.w <= 0.001) return p;
+    float age = t - birth;
+    if (age < 0.0 || age > 3.0) return p;
+    float decay = exp(-age / 0.8) * v.w;
+    vec3 d = p - v.xyz;
+    float dl = length(d) + 0.0001;
+    vec3 tv = vec3(-d.z, 0.0, d.x);
+    float tl = length(tv) + 0.0001;
+    p += (tv / tl) * decay * 1.7 / (dl + 0.6);
+    p += (d / dl) * decay * 0.35 / (dl + 0.6);
+    return p;
+}
+
 void main(void) {
     float seed = aUv0.z;
     float size = aUv0.w;
-    vec3 p = aPosition;
+    vec3 p = mix(aPosition, aTarget, uMorph);
 
     float t = uTime;
     float radial = length(p);
-    float ang = t * 0.14 + uOpen * 0.8 + uMid * 0.25;
+    float ang = t * 0.14 + uMorph * 0.6 + uMid * 0.25;
     float ca = cos(ang);
     float sa = sin(ang);
     vec3 q = vec3(ca * p.x + sa * p.z, p.y, -sa * p.x + ca * p.z);
 
-    // раскрытие тора в мандалу при разведении ладоней
-    q.xz *= 1.0 + uOpen * 0.55;
-    q.y *= 1.0 + uOpen * 1.35;
     q.y += sin(t * 0.8 + seed * 6.2831 + radial * 0.7) * (0.09 + uBass * 0.22);
     q *= 1.0 + uBass * (0.12 + 0.20 * seed);
 
@@ -131,6 +156,11 @@ void main(void) {
     q = handPush(q, uHand5, uBass, uSpin5);
     q = handPush(q, uHand6, uBass, uSpin6);
     q = handPush(q, uHand7, uBass, uSpin7);
+
+    q = vortexPush(q, uVortex0, uVortexT0, t);
+    q = vortexPush(q, uVortex1, uVortexT1, t);
+    q = vortexPush(q, uVortex2, uVortexT2, t);
+    q = vortexPush(q, uVortex3, uVortexT3, t);
 
     vec3 right = vec3(matrix_view[0][0], matrix_view[1][0], matrix_view[2][0]);
     vec3 up    = vec3(matrix_view[0][1], matrix_view[1][1], matrix_view[2][1]);
@@ -568,6 +598,7 @@ PsyScene.prototype.initialize = function () {
     this.wsUrl = this.wsUrl || 'ws://127.0.0.1:8091';
     this.cameraName = this.cameraName || 'MainCamera';
     this.cameraMotion = (this.cameraMotion !== false);
+    this.minConfidence = (typeof this.minConfidence === 'number') ? this.minConfidence : 0.5;
     this.particleCount = Math.max(500, Math.min(20000, Number(this.particleCount) || 6000));
     this.linksPerHand = Number(this.linksPerHand) || 34;
     this.hueSpeed = (typeof this.hueSpeed === 'number') ? this.hueSpeed : 0.045;
@@ -625,6 +656,11 @@ PsyScene.prototype.initialize = function () {
     this.targetTime = new Float32Array(MAX_HANDS);
     this.targetValid = [false, false, false, false, false, false, false, false];
     this.tunnelPhase = 0;
+    this.vortexPos = new Float32Array(4 * 3);
+    this.vortexBirth = new Float32Array([-999, -999, -999, -999]);
+    this.vortexStrength = new Float32Array(4);
+    this.vortexNext = 0;
+    this._lastVortexAt = -999;
     this.spinUniforms = [];
     for (var su = 0; su < MAX_HANDS; su++) this.spinUniforms.push(0);
 
@@ -701,6 +737,8 @@ PsyScene.prototype._createParticles = function () {
     var verts = count * 6;
     var positions = new Float32Array(verts * 3);
     var extras = new Float32Array(verts * 4);
+    var targetsBuf = new Float32Array(verts * 3);
+    this.mandalaPos = new Float32Array(count * 3);
     var corners = [
         [-1, -1], [1, -1], [1, 1],
         [-1, -1], [1, 1], [-1, 1]
@@ -718,6 +756,19 @@ PsyScene.prototype._createParticles = function () {
         var x = (ring + tube * Math.cos(vv)) * Math.cos(uu);
         var z = (ring + tube * Math.cos(vv)) * Math.sin(uu);
         var y = tube * Math.sin(vv) * 0.62 + yOff + (rnd() - 0.5) * 0.18;
+
+        // цель morph: радиальная мандала с 10 лепестками и слоями
+        var angM = Math.atan2(z, x);
+        var petal = 0.72 + 0.28 * Math.cos(angM * 10.0 + layer * 0.55);
+        var baseR = 2.4 + layer * 2.35;
+        var mr = baseR * petal + (rnd() - 0.5) * 0.45;
+        var mx = Math.cos(angM) * mr;
+        var mz = Math.sin(angM) * mr;
+        var my = (layer - 1) * 2.2 + (rnd() - 0.5) * 0.5;
+
+        this.mandalaPos[i * 3] = mx;
+        this.mandalaPos[i * 3 + 1] = my;
+        this.mandalaPos[i * 3 + 2] = mz;
 
         var seed = rnd();
         var size = 0.042 + rnd() * 0.09;
@@ -737,12 +788,16 @@ PsyScene.prototype._createParticles = function () {
             extras[v * 4 + 1] = corners[c][1];
             extras[v * 4 + 2] = seed;
             extras[v * 4 + 3] = size;
+            targetsBuf[v * 3] = mx;
+            targetsBuf[v * 3 + 1] = my;
+            targetsBuf[v * 3 + 2] = mz;
         }
     }
 
     var mesh = this._ownMesh(new pc.Mesh(device));
     mesh.setPositions(positions);
     mesh.setUvs(0, extras, 4);
+    mesh.setUvs(1, targetsBuf, 3);
     mesh.update(pc.PRIMITIVE_TRIANGLES);
     mesh.aabb = new pc.BoundingBox(new pc.Vec3(0, 0, 0), new pc.Vec3(40, 30, 40));
 
@@ -750,7 +805,8 @@ PsyScene.prototype._createParticles = function () {
         uniqueName: 'psyParticles',
         attributes: {
             aPosition: pc.SEMANTIC_POSITION,
-            aUv0: pc.SEMANTIC_TEXCOORD0
+            aUv0: pc.SEMANTIC_TEXCOORD0,
+            aTarget: pc.SEMANTIC_TEXCOORD1
         },
         vshader: PARTICLE_VS,
         fshader: PARTICLE_FS,
@@ -1056,7 +1112,12 @@ PsyScene.prototype._createRibbons = function () {
     this.ribbonMaxVerts = 8192;
     this.ribbonData = new Float32Array(this.ribbonMaxVerts * 7);
     this.ribbonPts = [];
-    for (var h = 0; h < MAX_HANDS; h++) this.ribbonPts.push([]);
+    this.ribbonSeg = new Int32Array(MAX_HANDS);
+    this.ribbonWasActive = [];
+    for (var h = 0; h < MAX_HANDS; h++) {
+        this.ribbonPts.push([]);
+        this.ribbonWasActive.push(false);
+    }
 
     var format = new pc.VertexFormat(device, [
         { semantic: pc.SEMANTIC_POSITION, components: 3, type: pc.TYPE_FLOAT32 },
@@ -1119,12 +1180,19 @@ PsyScene.prototype._updateRibbons = function () {
         var y = this.handPos[h * 3 + 1];
         var z = this.handPos[h * 3 + 2];
 
+        if (active && !this.ribbonWasActive[h]) {
+            this.ribbonSeg[h]++;
+        }
+        this.ribbonWasActive[h] = active;
+
         if (active) {
             var last = pts[pts.length - 1];
             var moved = !last || Math.hypot(x - last.x, y - last.y, z - last.z) > 0.02;
             var aged = !last || (now - last.t) > 0.05;
-            if (moved && aged) pts.push({ x: x, y: y, z: z, t: now });
-            if (pts.length > 260) pts.shift();
+            if (moved && aged) {
+                pts.push({ x: x, y: y, z: z, t: now, seg: this.ribbonSeg[h] });
+            }
+            if (pts.length > 320) pts.shift();
         }
         while (pts.length && (now - pts[0].t) > maxAge) pts.shift();
 
@@ -1137,8 +1205,9 @@ PsyScene.prototype._updateRibbons = function () {
         for (var i = 1; i < pts.length; i++) {
             var a = pts[i - 1];
             var b = pts[i];
+            if (a.seg !== b.seg) continue;
             var age = Math.max(0, (now - b.t) / maxAge);
-            var fade = Math.pow(1.0 - age, 1.6) * this.handStrength[h];
+            var fade = Math.pow(1.0 - age, 1.6) * (0.35 + this.bass * 0.35);
             if (fade <= 0.01) continue;
             var bright = fade * glowPulse;
             var alpha = 0.7 * fade;
@@ -1214,6 +1283,7 @@ PsyScene.prototype._validateJoint = function (j) {
     var v = Number(j.length > 3 ? j[3] : 1);
     if (!isFinite(x) || !isFinite(y) || !isFinite(z) || !isFinite(v)) return null;
     if (x < -0.25 || x > 1.25 || y < -0.25 || y > 1.25) return null;
+    if (v < this.minConfidence) return null;
     return [
         Math.min(1, Math.max(0, x)),
         Math.min(1, Math.max(0, y)),
@@ -1237,6 +1307,18 @@ PsyScene.prototype._norm = function (joint) {
     return [x, y, z, Math.max(0, Math.min(1, vis))];
 };
 
+PsyScene.prototype._spawnVortex = function (world) {
+    if (this.t - this._lastVortexAt < 0.12) return;
+    this._lastVortexAt = this.t;
+    var i = this.vortexNext;
+    this.vortexNext = (i + 1) % 4;
+    this.vortexPos[i * 3] = world[0];
+    this.vortexPos[i * 3 + 1] = world[1];
+    this.vortexPos[i * 3 + 2] = world[2];
+    this.vortexBirth[i] = this.t;
+    this.vortexStrength[i] = 1.0;
+};
+
 PsyScene.prototype._trackSpeed = function (h, world, now) {
     if (this.targetValid[h]) {
         var dtm = now - this.targetTime[h];
@@ -1246,8 +1328,18 @@ PsyScene.prototype._trackSpeed = function (h, world, now) {
             var dz = world[2] - this.targetPos[h * 3 + 2];
             var speed = Math.sqrt(dx * dx + dy * dy + dz * dz) / dtm;
             this.lastSpeed = speed;
-            if (speed > 8.0) {
+            if (speed > 120.0) {
+                // телепорт трекинга: новая база, без жеста
+                this.targetPos[h * 3] = world[0];
+                this.targetPos[h * 3 + 1] = world[1];
+                this.targetPos[h * 3 + 2] = world[2];
+                this.targetTime[h] = now;
+                return;
+            }
+            this.speedAvg = (this.speedAvg || 0) * 0.7 + speed * 0.3;
+            if (this.speedAvg > 8.0) {
                 this.impulses[h] = Math.min(1, this.impulses[h] + 0.85);
+                this._spawnVortex(world);
             }
         }
     }
@@ -1282,6 +1374,8 @@ PsyScene.prototype._onMessage = function (data) {
         this.targets[i].present = false;
         this.targets[i].left = null;
         this.targets[i].right = null;
+        this.targetValid[i * 2] = false;
+        this.targetValid[i * 2 + 1] = false;
     }
 
     var anyPresent = false;
@@ -1371,9 +1465,6 @@ PsyScene.prototype._initAudio = function () {
         return;
     }
 
-    this.actx = new Ctx();
-    if (this.actx.state === 'suspended') this.actx.resume().catch(function () {});
-
     navigator.mediaDevices.getUserMedia({
         audio: {
             echoCancellation: false,
@@ -1383,19 +1474,30 @@ PsyScene.prototype._initAudio = function () {
     }).then(function (stream) {
         if (self._disposed) {
             stream.getTracks().forEach(function (t) { t.stop(); });
-            try { self.actx.close(); } catch (e) { /* noop */ }
             return;
         }
-        self.audioStream = stream;
-        var src = self.actx.createMediaStreamSource(stream);
-        var analyser = self.actx.createAnalyser();
+        var actx = new Ctx();
+        self.actx = actx;
+        if (actx.state === 'suspended') actx.resume().catch(function () {});
+
+        var src = actx.createMediaStreamSource(stream);
+        var analyser = actx.createAnalyser();
         analyser.fftSize = 2048;
         analyser.smoothingTimeConstant = 0.7;
         src.connect(analyser);
         self.analyser = analyser;
         self.freq = new Uint8Array(analyser.frequencyBinCount);
-        self.binHz = self.actx.sampleRate / analyser.fftSize;
+        self.binHz = actx.sampleRate / analyser.fftSize;
+        self.audioStream = stream;
         self.audioReady = true;
+
+        var track = stream.getAudioTracks()[0];
+        if (track) {
+            track.onended = function () {
+                self.audioReady = false;
+                self.analyser = null;
+            };
+        }
         console.log('[PsyScene] microphone enabled, bin=' + self.binHz.toFixed(1) + 'Hz');
     }).catch(function (err) {
         self.audioReady = false;
@@ -1482,9 +1584,10 @@ PsyScene.prototype._updateDemo = function () {
 // Позиция частицы (CPU-зеркало вершинного шейдера)
 // ---------------------------------------------------------------------------
 PsyScene.prototype._particlePos = function (index, hands, out, offset) {
-    var x = this.basePos[index * 3];
-    var y = this.basePos[index * 3 + 1];
-    var z = this.basePos[index * 3 + 2];
+    var morph = this.openness;
+    var x = this.basePos[index * 3] * (1 - morph) + this.mandalaPos[index * 3] * morph;
+    var y = this.basePos[index * 3 + 1] * (1 - morph) + this.mandalaPos[index * 3 + 1] * morph;
+    var z = this.basePos[index * 3 + 2] * (1 - morph) + this.mandalaPos[index * 3 + 2] * morph;
     var seed = this.seeds[index];
 
     var t = this.t;
@@ -1496,10 +1599,6 @@ PsyScene.prototype._particlePos = function (index, hands, out, offset) {
     var qz = -sa * x + ca * z;
     var qy = y;
 
-    var openScale = 1.0 + this.openness * 0.55;
-    qx *= openScale;
-    qz *= openScale;
-    qy *= 1.0 + this.openness * 1.35;
     qy += Math.sin(t * 0.8 + seed * 6.2831 + radial * 0.7) * (0.09 + this.bass * 0.22);
 
     var grow = 1.0 + this.bass * (0.12 + 0.20 * seed);
@@ -1531,6 +1630,28 @@ PsyScene.prototype._particlePos = function (index, hands, out, offset) {
         var tk = f * (0.55 + this.bass * 1.4 + this.spinUniforms[i] * 3.5);
         qx += (tx / tl) * tk;
         qz += (tz / tl) * tk;
+    }
+
+    for (var vi = 0; vi < 4; vi++) {
+        var vs = this.vortexStrength[vi];
+        if (vs <= 0.001) continue;
+        var agev = this.t - this.vortexBirth[vi];
+        if (agev < 0 || agev > 3) continue;
+        var decayv = Math.exp(-agev / 0.8) * vs;
+        var vx = qx - this.vortexPos[vi * 3];
+        var vy = qy - this.vortexPos[vi * 3 + 1];
+        var vz = qz - this.vortexPos[vi * 3 + 2];
+        var vdl = Math.sqrt(vx * vx + vy * vy + vz * vz) + 0.0001;
+        var vtx = -vz;
+        var vtz = vx;
+        var vtl = Math.sqrt(vtx * vtx + vtz * vtz) + 0.0001;
+        var vf = decayv * 1.7 / (vdl + 0.6);
+        qx += (vtx / vtl) * vf;
+        qz += (vtz / vtl) * vf;
+        var vk = decayv * 0.35 / (vdl + 0.6);
+        qx += (vx / vdl) * vk;
+        qy += (vy / vdl) * vk;
+        qz += (vz / vdl) * vk;
     }
 
     out[offset] = qx;
@@ -1582,6 +1703,8 @@ PsyScene.prototype._updateLinks = function () {
                 used[pidx] = true;
             }
         }
+
+        picked.sort(function (a, b) { return a[3] - b[3]; });
 
         // ближайшие K
         for (var i = 0; i < cand.length; i++) {
@@ -1766,6 +1889,16 @@ PsyScene.prototype.update = function (dt) {
         mat.setParameter('uTreble', this.treble);
         mat.setParameter('uHueSpeed', this.hueSpeed);
         mat.setParameter('uOpen', this.openness);
+        mat.setParameter('uMorph', this.openness);
+        for (var vi = 0; vi < 4; vi++) {
+            mat.setParameter('uVortex' + vi, [
+                this.vortexPos[vi * 3],
+                this.vortexPos[vi * 3 + 1],
+                this.vortexPos[vi * 3 + 2],
+                this.vortexStrength[vi]
+            ]);
+            mat.setParameter('uVortexT' + vi, this.vortexBirth[vi]);
+        }
 
         for (var u = 0; u < MAX_HANDS; u++) {
             var uu = this.handUniforms[u];
